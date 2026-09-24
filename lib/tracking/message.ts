@@ -4,6 +4,23 @@ export interface MessageTrackedLink {
 }
 
 const URL_PATTERN = /https?:\/\/[^\s<>"')\]]+/i;
+const CJK_PATTERN = /[㐀-鿿豈-﫿]/;
+
+/**
+ * Word used for {username} when Instagram gives us no name. An English
+ * "there" reads wrong inside a Chinese message ("Hi there，多謝留言"), so
+ * messages containing CJK characters get a Chinese fallback instead.
+ */
+export function usernameFallback(message: string) {
+  return CJK_PATTERN.test(message) ? "朋友" : "there";
+}
+
+function personalize(message: string, commenterName?: string | null) {
+  return message.replace(
+    /\{username\}/gi,
+    commenterName || usernameFallback(message)
+  );
+}
 
 function trimTrailingPunctuation(url: string) {
   return url.replace(/[.,!?;:]+$/, "");
@@ -45,8 +62,7 @@ export function renderMessageWithoutLink({
   message: string;
   commenterName?: string | null;
 }) {
-  return message
-    .replace(/\{username\}/gi, commenterName ?? "there")
+  return personalize(message, commenterName)
     .replace(/\s*\{link\}\s*/gi, " ")
     .trim();
 }
@@ -72,7 +88,7 @@ export function renderMessageWithTracking({
   trackedLinks?: MessageTrackedLink[];
   baseUrl?: string;
 }) {
-  let rendered = message.replace(/\{username\}/gi, commenterName ?? "there");
+  let rendered = personalize(message, commenterName);
   const primaryLink = trackedLinks?.[0];
 
   if (!primaryLink) return rendered;

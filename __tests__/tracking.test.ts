@@ -7,8 +7,10 @@ import {
 import {
   buildTrackedUrl,
   extractFirstUrl,
+  renderMessageWithoutLink,
   renderMessageWithTracking,
   replaceUrlWithTrackedPlaceholder,
+  usernameFallback,
 } from "../lib/tracking/message";
 
 describe("tracked link messages", () => {
@@ -37,6 +39,22 @@ describe("tracked link messages", () => {
         baseUrl: "https://manychat-alternative.com",
       })
     ).toBe("Hey Maya, grab it here: https://manychat-alternative.com/r/abc123");
+  });
+
+  it("falls back to a Chinese word when the name is missing from a Chinese message", () => {
+    expect(
+      renderMessageWithTracking({ message: "Hi {username}，多謝留言！", commenterName: null })
+    ).toBe("Hi 朋友，多謝留言！");
+    expect(
+      renderMessageWithoutLink({ message: "{username} 你好 {link}", commenterName: "" })
+    ).toBe("朋友 你好");
+  });
+
+  it("keeps the English fallback for English messages", () => {
+    expect(
+      renderMessageWithTracking({ message: "Hey {username}!", commenterName: undefined })
+    ).toBe("Hey there!");
+    expect(usernameFallback("Thanks for commenting")).toBe("there");
   });
 
   it("can replace a raw destination URL when the placeholder is missing", () => {
