@@ -206,6 +206,13 @@ model Automation {
   reportShareSlug    String? @unique
   reportShareEnabled Boolean @default(true)
 
+  // Set when another HobbyLand system creates the campaign through
+  // /api/integrations/v1/automations. externalId ("hub:vp-xxxx:<account>") is
+  // the idempotency key: a resend updates the same campaign.
+  externalId   String? @unique
+  sourceSystem String?
+  sourceRef    String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
