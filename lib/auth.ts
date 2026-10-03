@@ -3,8 +3,18 @@ import Nodemailer from "next-auth/providers/nodemailer";
 import Resend from "next-auth/providers/resend";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/db/client";
-import { ensureWorkspaceForUser, getPrimaryWorkspace } from "@/lib/workspace";
+import {
+  acceptPendingInvitationsForUser,
+  ensureWorkspaceForUser,
+  getPrimaryWorkspace,
+} from "@/lib/workspace";
 import { isEmailAllowedToSignIn } from "@/lib/env";
+import {
+  authorizeHobbylandSignIn,
+  hobbylandProvider,
+  HOBBYLAND_PROVIDER_ID,
+  type HobbylandProfile,
+} from "@/lib/hobbyland-sso";
 
 type AdapterPrismaClient = Parameters<typeof PrismaAdapter>[0];
 
@@ -20,9 +30,14 @@ const smtpServer = process.env.EMAIL_SERVER;
  */
 export const EMAIL_PROVIDER_ID = smtpServer ? "nodemailer" : "resend";
 
+// HobbyLand unified login is only offered once its client id and secret are
+// configured; see lib/hobbyland-sso.ts.
+const hobbyland = hobbylandProvider();
+
 export const authConfig = {
   adapter: PrismaAdapter(prisma as unknown as AdapterPrismaClient),
   providers: [
+    ...(hobbyland ? [hobbyland] : []),
     smtpServer
       ? Nodemailer({ server: smtpServer, from: emailFrom })
       : Resend({
@@ -31,9 +46,17 @@ export const authConfig = {
         }),
   ],
   callbacks: {
-    // Runs before the magic link is sent, so a blocked address never receives
-    // one, and again when the link is verified.
-    async signIn({ user }) {
+    // Email: runs before the magic link is sent, so a blocked address never
+    // receives one, and again when the link is verified.
+    // HobbyLand: runs after the ID token is verified and before Auth.js links
+    // or creates any user, so a refused identity never touches the database.
+    async signIn({ user, account, profile }) {
+      if (account?.provider === HOBBYLAND_PROVIDER_ID) {
+        return authorizeHobbylandSignIn({
+          account,
+          profile: profile as HobbylandProfile | undefined,
+        });
+      }
       return isEmailAllowedToSignIn(user?.email);
     },
     async session({ session, user }) {
@@ -45,9 +68,16 @@ export const authConfig = {
   },
   events: {
     async createUser({ user }) {
-      if (user.id) {
-        await ensureWorkspaceForUser(user.id, user.email);
+      if (!user.id) return;
+      // Only an OAuth sign-up (HobbyLand) creates a user without a verified
+      // email date. Such a user joins workspaces by invitation only and never
+      // gets a workspace of their own.
+      const { emailVerified } = user as { emailVerified?: Date | null };
+      if (!emailVerified) {
+        await acceptPendingInvitationsForUser(user.id, user.email);
+        return;
       }
+      await ensureWorkspaceForUser(user.id, user.email);
     },
   },
   pages: {
@@ -81,5 +111,5 @@ export async function getCurrentWorkspaceId(): Promise<string | null> {
   });
 
   const createdWorkspace = await ensureWorkspaceForUser(userId, user?.email);
-  return createdWorkspace.id;
+  return createdWorkspace?.id ?? null;
 }

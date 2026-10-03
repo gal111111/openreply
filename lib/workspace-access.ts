@@ -55,6 +55,8 @@ export async function getCurrentWorkspaceContext(): Promise<WorkspaceContext | n
     select: { email: true },
   });
   const workspace = await ensureWorkspaceForUser(userId, user?.email);
+  // Invite-only (HobbyLand) users have no workspace until they are invited.
+  if (!workspace) return null;
   const createdMembership = await prisma.workspaceMember.findUnique({
     where: {
       workspaceId_userId: {

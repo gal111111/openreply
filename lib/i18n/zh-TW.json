@@ -446,5 +446,10 @@
   "{name} Campaign Report": "{name} 活動報表",
   "{type} post": "{type} 貼文",
   "”": "」",
-  "← Campaigns": "← 返回活動列表"
+  "← Campaigns": "← 返回活動列表",
+  "You have not joined a workspace yet": "您尚未加入任何工作區",
+  "Ask a workspace owner or admin to invite {email}. You can use OpenReply after you accept the invitation.": "請聯絡工作區擁有者或管理員，邀請 {email} 加入；接受邀請後即可使用 OpenReply。",
+  "Sign out": "登出",
+  "Or sign in with an email link": "或使用電子郵件連結登入",
+  "Sign-in was not allowed. Use an approved, verified email or ask an administrator for access.": "未能登入。請使用已核准並已驗證的電子郵件，或聯絡管理員申請存取權限。"
 }

@@ -3,6 +3,11 @@ import { getI18n } from "@/lib/i18n/server";
 import { getCampaignTemplate } from "@/lib/templates/campaign-templates";
 import { DemoNotice } from "@/components/demo-notice";
 import { isPublicDemoHost } from "@/lib/env";
+import {
+  HOBBYLAND_PROVIDER_ID,
+  HOBBYLAND_SIGN_IN_LABEL,
+  isHobbylandSsoConfigured,
+} from "@/lib/hobbyland-sso";
 
 const GITHUB_URL = "https://github.com/diwenne/openreply";
 const SETUP_DOCS_URL = `${GITHUB_URL}/blob/main/docs/setup.md`;
@@ -22,6 +27,7 @@ export default async function LoginPage({
     checkEmail?: string;
     callbackUrl?: string;
     template?: string;
+    error?: string;
   }>;
 }) {
   const { t } = await getI18n();
@@ -60,6 +66,14 @@ export default async function LoginPage({
     ? `/campaigns/new?template=${selectedTemplate.slug}`
     : null;
   const callbackUrl = params.callbackUrl ?? templateCallbackUrl ?? "/dashboard";
+  const showHobbyland = isHobbylandSsoConfigured();
+  // Auth.js sends refused or failed sign-ins back here with ?error=<code>.
+  const signInError = Boolean(params.error);
+
+  async function signInWithHobbyland() {
+    "use server";
+    await signIn(HOBBYLAND_PROVIDER_ID, { redirectTo: callbackUrl });
+  }
 
   async function sendMagicLink(formData: FormData) {
     "use server";
@@ -95,6 +109,27 @@ export default async function LoginPage({
                 {selectedTemplate.title}
               </p>
             </div>
+          )}
+
+          {signInError && !checkEmail && (
+            <p role="alert" className="mb-5 text-sm text-error">
+              {t("Sign-in was not allowed. Use an approved, verified email or ask an administrator for access.")}
+            </p>
+          )}
+
+          {showHobbyland && !checkEmail && (
+            <form action={signInWithHobbyland} className="mb-6 space-y-4">
+              <button
+                type="submit"
+                data-testid="hobbyland-sso"
+                className="w-full inline-flex items-center justify-center gap-2 rounded border border-accent/40 bg-surface px-6 py-3.5 text-sm font-semibold text-foreground transition-colors hover:border-accent"
+              >
+                {HOBBYLAND_SIGN_IN_LABEL}
+              </button>
+              <p className="text-center text-xs text-muted">
+                {t("Or sign in with an email link")}
+              </p>
+            </form>
           )}
 
           {checkEmail ? (
