@@ -50,6 +50,10 @@ model Session {
   sessionToken String   @unique
   userId       String
   expires      DateTime
+  // Set to "hobbyland" for sessions created through HobbyLand unified login;
+  // those last 8 hours from sign-in and are never extended. Null for every
+  // other sign-in method, whose sessions keep the default rolling lifetime.
+  authProvider String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

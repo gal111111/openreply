@@ -11,7 +11,10 @@ import {
 import { isEmailAllowedToSignIn } from "@/lib/env";
 import {
   authorizeHobbylandSignIn,
+  DEFAULT_SESSION_MAX_AGE_SECONDS,
   hobbylandProvider,
+  limitHobbylandSession,
+  withHobbylandSessionLimit,
   HOBBYLAND_PROVIDER_ID,
   type HobbylandProfile,
 } from "@/lib/hobbyland-sso";
@@ -35,7 +38,10 @@ export const EMAIL_PROVIDER_ID = smtpServer ? "nodemailer" : "resend";
 const hobbyland = hobbylandProvider();
 
 export const authConfig = {
-  adapter: PrismaAdapter(prisma as unknown as AdapterPrismaClient),
+  // HobbyLand sessions are fixed at 8 hours and must not be rolled forward.
+  adapter: withHobbylandSessionLimit(
+    PrismaAdapter(prisma as unknown as AdapterPrismaClient)
+  ),
   providers: [
     ...(hobbyland ? [hobbyland] : []),
     smtpServer
@@ -67,6 +73,15 @@ export const authConfig = {
     },
   },
   events: {
+    // Sessions created through HobbyLand unified login last 8 hours; every
+    // other sign-in method keeps the default session lifetime.
+    async signIn({ user, account }) {
+      if (account?.provider === HOBBYLAND_PROVIDER_ID) {
+        await limitHobbylandSession(user?.id, {
+          defaultMaxAgeSeconds: DEFAULT_SESSION_MAX_AGE_SECONDS,
+        });
+      }
+    },
     async createUser({ user }) {
       if (!user.id) return;
       // Only an OAuth sign-up (HobbyLand) creates a user without a verified
@@ -86,6 +101,7 @@ export const authConfig = {
   },
   session: {
     strategy: "database",
+    maxAge: DEFAULT_SESSION_MAX_AGE_SECONDS,
   },
   trustHost: true,
   secret: process.env.NEXTAUTH_SECRET,

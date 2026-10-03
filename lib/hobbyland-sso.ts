@@ -1,4 +1,5 @@
 import type { Account, Profile } from "next-auth";
+import type { Adapter, AdapterSession } from "next-auth/adapters";
 import type { OIDCConfig } from "next-auth/providers";
 import { prisma } from "@/lib/db/client";
 import { isEmailAllowedToSignIn } from "@/lib/env";
@@ -185,4 +186,105 @@ export async function authorizeHobbylandSignIn(
 
   if (await lookups.accountLinked(HOBBYLAND_PROVIDER_ID, subject)) return true;
   return lookups.userExistsByEmail(email);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Session lifetime                                                          */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Sessions created through HobbyLand unified login last 8 hours from sign-in,
+ * the same as the central identity session (user decision, 2026-10-03), and
+ * are never extended. Magic-link sessions keep the default 30-day rolling
+ * lifetime.
+ */
+export const HOBBYLAND_SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
+/** Auth.js default, stated explicitly so the lookup window below matches it. */
+export const DEFAULT_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+/** Slack between Auth.js creating the session and events.signIn running. */
+const NEW_SESSION_WINDOW_MS = 2 * 60 * 1000;
+
+type SessionRow = {
+  sessionToken: string;
+  userId: string;
+  expires: Date;
+  authProvider?: string | null;
+};
+
+export type HobbylandSessionStore = {
+  session: {
+    updateMany(args: {
+      where: {
+        userId: string;
+        authProvider: null;
+        expires: { gte: Date };
+      };
+      data: { expires: Date; authProvider: string };
+    }): Promise<{ count: number }>;
+    findUnique(args: {
+      where: { sessionToken: string };
+    }): Promise<SessionRow | null>;
+  };
+};
+
+/**
+ * Runs from events.signIn after a HobbyLand sign-in. Auth.js has just created
+ * the database session with the default 30-day expiry and gives no hook to
+ * choose it per provider, so the session is found here (this user's session
+ * whose expiry is still within two minutes of a full 30 days, i.e. created
+ * moments ago) and cut to 8 hours. In the rare case the same user also
+ * finished a magic-link sign-in in another browser within those two minutes,
+ * that session is shortened too, which errs on the safe side.
+ *
+ * When the user was already signed in, Auth.js reuses the existing session
+ * and creates none; nothing matches and that session keeps its lifetime.
+ */
+export async function limitHobbylandSession(
+  userId: string | undefined,
+  options: { now?: Date; defaultMaxAgeSeconds?: number } = {},
+  store: HobbylandSessionStore = prisma as unknown as HobbylandSessionStore
+): Promise<number> {
+  if (!userId) return 0;
+  const now = options.now ?? new Date();
+  const defaultMaxAge = options.defaultMaxAgeSeconds ?? DEFAULT_SESSION_MAX_AGE_SECONDS;
+  const newSessionFloor = new Date(
+    now.getTime() + defaultMaxAge * 1000 - NEW_SESSION_WINDOW_MS
+  );
+  const { count } = await store.session.updateMany({
+    where: { userId, authProvider: null, expires: { gte: newSessionFloor } },
+    data: {
+      expires: new Date(now.getTime() + HOBBYLAND_SESSION_MAX_AGE_SECONDS * 1000),
+      authProvider: HOBBYLAND_PROVIDER_ID,
+    },
+  });
+  if (count === 0) {
+    console.warn("[hobbyland-sso] 找不到剛建立的統一登入 session，未能設定 8 小時時限。");
+  }
+  return count;
+}
+
+/**
+ * Wraps the Prisma adapter so a HobbyLand session is never extended. Auth.js
+ * asks to roll the expiry forward once a session is older than updateAge;
+ * for an 8-hour session that is on every request, so the stored row is
+ * returned unchanged instead. Other sessions are passed through untouched.
+ */
+export function withHobbylandSessionLimit(
+  adapter: Adapter,
+  store: HobbylandSessionStore = prisma as unknown as HobbylandSessionStore
+): Adapter {
+  const updateSession = adapter.updateSession;
+  if (!updateSession) return adapter;
+  return {
+    ...adapter,
+    async updateSession(session) {
+      const stored = await store.session.findUnique({
+        where: { sessionToken: session.sessionToken },
+      });
+      if (stored?.authProvider === HOBBYLAND_PROVIDER_ID) {
+        return stored as AdapterSession;
+      }
+      return updateSession(session);
+    },
+  };
 }

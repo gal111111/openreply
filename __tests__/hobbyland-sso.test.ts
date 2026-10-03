@@ -5,6 +5,7 @@ const { mockPrisma } = vi.hoisted(() => ({
   mockPrisma: {
     user: { findUnique: vi.fn() },
     account: { findUnique: vi.fn() },
+    session: { updateMany: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
     workspaceInvitation: { findMany: vi.fn() },
     workspaceMember: { findFirst: vi.fn(), upsert: vi.fn() },
     workspace: { create: vi.fn() },
@@ -41,6 +42,8 @@ beforeEach(() => {
   vi.resetModules();
   mockPrisma.user.findUnique.mockResolvedValue(null);
   mockPrisma.account.findUnique.mockResolvedValue(null);
+  mockPrisma.session.updateMany.mockResolvedValue({ count: 1 });
+  mockPrisma.session.findUnique.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -257,6 +260,104 @@ describe("invite-only workspaces for HobbyLand users", () => {
     await expect(ensureWorkspaceForUser("user_1", "owner@example.com")).resolves.toEqual({
       id: "ws_1",
     });
+  });
+});
+
+describe("HobbyLand session lifetime (8 hours)", () => {
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+
+  it("keeps the default 30-day database session for every sign-in method", async () => {
+    const { authConfig } = await import("../lib/auth");
+    expect(authConfig.session.strategy).toBe("database");
+    expect(authConfig.session.maxAge).toBe(30 * 24 * 60 * 60);
+  });
+
+  it("cuts the session just created by a HobbyLand sign-in to 8 hours", async () => {
+    configureSso();
+    const { authConfig } = await import("../lib/auth");
+    const before = Date.now();
+    await authConfig.events.signIn({
+      user: { id: "user-1", email: "staff@hobbyland-group.com" },
+      account: hobbylandAccount(),
+    });
+    const after = Date.now();
+
+    expect(mockPrisma.session.updateMany).toHaveBeenCalledTimes(1);
+    const [{ where, data }] = mockPrisma.session.updateMany.mock.calls[0];
+    expect(where.userId).toBe("user-1");
+    expect(where.authProvider).toBeNull();
+    // Only a session whose expiry is still about 30 days out, i.e. the one
+    // Auth.js created moments ago, is touched.
+    expect(where.expires.gte.getTime()).toBeGreaterThanOrEqual(before + 30 * DAY - 2 * 60 * 1000);
+    expect(where.expires.gte.getTime()).toBeLessThanOrEqual(after + 30 * DAY);
+    expect(data.authProvider).toBe("hobbyland");
+    expect(data.expires.getTime()).toBeGreaterThanOrEqual(before + 8 * HOUR);
+    expect(data.expires.getTime()).toBeLessThanOrEqual(after + 8 * HOUR);
+  });
+
+  it("leaves magic-link sessions alone", async () => {
+    configureSso();
+    const { authConfig } = await import("../lib/auth");
+    await authConfig.events.signIn({
+      user: { id: "user-1", email: "staff@hobbyland-group.com" },
+      account: { provider: "resend", providerAccountId: "staff@hobbyland-group.com", type: "email" },
+    });
+    await authConfig.events.signIn({
+      user: { id: "user-1", email: "staff@hobbyland-group.com" },
+      account: { provider: "nodemailer", providerAccountId: "staff@hobbyland-group.com", type: "email" },
+    });
+    expect(mockPrisma.session.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("never rolls a HobbyLand session forward", async () => {
+    const expires = new Date(Date.now() + 2 * HOUR);
+    mockPrisma.session.findUnique.mockResolvedValue({
+      sessionToken: "tok-sso",
+      userId: "user-1",
+      expires,
+      authProvider: "hobbyland",
+    });
+    const { authConfig } = await import("../lib/auth");
+    const result = await authConfig.adapter.updateSession!({
+      sessionToken: "tok-sso",
+      expires: new Date(Date.now() + 30 * DAY),
+    });
+    expect(mockPrisma.session.update).not.toHaveBeenCalled();
+    expect(result?.expires).toEqual(expires);
+  });
+
+  it("still rolls magic-link sessions forward as before", async () => {
+    mockPrisma.session.findUnique.mockResolvedValue({
+      sessionToken: "tok-mail",
+      userId: "user-1",
+      expires: new Date(Date.now() + 10 * DAY),
+      authProvider: null,
+    });
+    const newExpires = new Date(Date.now() + 30 * DAY);
+    mockPrisma.session.update.mockResolvedValue({
+      sessionToken: "tok-mail",
+      userId: "user-1",
+      expires: newExpires,
+      authProvider: null,
+    });
+    const { authConfig } = await import("../lib/auth");
+    const result = await authConfig.adapter.updateSession!({
+      sessionToken: "tok-mail",
+      expires: newExpires,
+    });
+    expect(mockPrisma.session.update).toHaveBeenCalledTimes(1);
+    expect(result?.expires).toEqual(newExpires);
+  });
+
+  it("does nothing when the signed-in user already had a session (none created)", async () => {
+    mockPrisma.session.updateMany.mockResolvedValue({ count: 0 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { limitHobbylandSession } = await import("../lib/hobbyland-sso");
+    await expect(limitHobbylandSession("user-1")).resolves.toBe(0);
+    await expect(limitHobbylandSession(undefined)).resolves.toBe(0);
+    expect(mockPrisma.session.updateMany).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 });
 
