@@ -106,7 +106,7 @@ function isUniqueViolation(error: unknown) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = verifyServiceKey(
+  const auth = await verifyServiceKey(
     request.headers.get("authorization"),
     "automations:write"
   );
@@ -301,7 +301,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
-  const auth = verifyServiceKey(
+  const auth = await verifyServiceKey(
     request.headers.get("authorization"),
     "automations:read"
   );

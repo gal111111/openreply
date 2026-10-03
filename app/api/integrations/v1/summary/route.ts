@@ -30,7 +30,7 @@ async function resolveScope(
   const authorization = request.headers.get("authorization");
 
   if (hasServiceKeyHeader(authorization)) {
-    const auth = verifyServiceKey(authorization, "summary:read");
+    const auth = await verifyServiceKey(authorization, "summary:read");
     if (!auth.ok) return serviceKeyErrorResponse(auth);
 
     const requested = request.nextUrl.searchParams.get("workspace");
