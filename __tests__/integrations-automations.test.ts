@@ -272,6 +272,40 @@ describe("POST /api/integrations/v1/automations", () => {
     expect(mockPrisma.automation.create).not.toHaveBeenCalled();
   });
 
+  it("creates a DM catch-all without a post", async () => {
+    const res = await POST(
+      post({
+        external_id: "igpub:menu",
+        workspace: "ws_1",
+        instagram_account: "skillaihk",
+        dm_fallback: true,
+        dm_message: "想攞邊份資料？回覆關鍵字：SKILLS／主頁",
+      })
+    );
+    expect(res.status).toBe(201);
+    expect(mockResolvePost).not.toHaveBeenCalled();
+    const data = mockPrisma.automation.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({
+      dmFallback: true,
+      dmTriggerEnabled: true,
+      matchAnyPost: true,
+      matchAnyWord: true,
+      keywords: [],
+      postId: null,
+      publicReplyEnabled: false,
+      name: "hub：私信選單",
+    });
+  });
+
+  it("rejects a catch-all mixed with other triggers, and a post campaign without post_url", async () => {
+    const base = { external_id: "x", workspace: "ws_1", instagram_account: "skillaihk", dm_message: "m" };
+    expect((await POST(post({ ...base, dm_fallback: true, keywords: ["A"] }))).status).toBe(400);
+    expect((await POST(post({ ...base, dm_fallback: true, match_any_comment: true }))).status).toBe(400);
+    expect((await POST(post({ ...base, dm_fallback: true, public_replies: ["hi"] }))).status).toBe(400);
+    expect((await POST(post({ ...base, keywords: ["A"] }))).status).toBe(400);
+    expect(mockPrisma.automation.create).not.toHaveBeenCalled();
+  });
+
   it("an update keeps dashboard public replies unless the caller sends them", async () => {
     const body = {
       ...payload,

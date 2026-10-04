@@ -189,6 +189,10 @@ model Automation {
   // keywords above. Independent of the post trigger — a DM has no media, so
   // postId / matchAnyPost do not apply to it.
   dmTriggerEnabled Boolean @default(false)
+  // Catch-all for DMs no keyword campaign matched (typically a menu of the
+  // keywords). Sent at most once per sender per 24 hours so a conversation is
+  // not answered on every message. Never fires on comments.
+  dmFallback     Boolean @default(false)
   dmMessage      String
   openingDmEnabled     Boolean @default(false)
   openingDmMessage     String?

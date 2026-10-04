@@ -326,6 +326,7 @@ describe("DM Worker — Full Pipeline", () => {
       where: {
         OR: [{ postId: "media_101" }, { matchAnyPost: true }],
         isActive: true,
+        dmFallback: false,
         instagramAccount: { instagramId: "ig_456" },
       },
       include: {
@@ -1399,5 +1400,130 @@ describe("durable Zernio postback delivery", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("DM Worker — public reply only after the DM", () => {
+  const replyingAutomation = {
+    ...mockAutomation,
+    publicReplyEnabled: true,
+    publicReplyMessages: ["私信你啦 📩"],
+  };
+
+  beforeEach(() => {
+    mockPrisma.automation.findMany.mockResolvedValue([replyingAutomation]);
+  });
+
+  it("posts the public reply after the private reply is sent", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    expect(sendCommentReply).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendCommentReply).mock.invocationCallOrder[0]).toBeGreaterThan(
+      mockSendPrivateReply.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("does not claim a DM in public when the private reply fails", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    mockSendPrivateReply.mockRejectedValue(new Error("An unknown error has occurred."));
+    const processor = getProcessor();
+
+    await expect(processor(createMockJob())).rejects.toThrow("unknown error");
+    expect(sendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("still replies when another campaign already sent the comment's DM", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    mockPrisma.dmLog.findFirst.mockImplementation(
+      async (args: { where?: { status?: string } } = {}) =>
+        args.where?.status === "SENT" ? { automation: { name: "other" } } : null
+    );
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(sendCommentReply).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("DM Worker — DM catch-all (menu)", () => {
+  const keywordCampaign = {
+    ...mockAutomation,
+    id: "auto_keyword",
+    dmTriggerEnabled: true,
+    dmFallback: false,
+    requireFollow: false,
+    dmMessage: "SKILLS guide",
+  };
+  const fallbackCampaign = {
+    ...mockAutomation,
+    id: "auto_menu",
+    postId: null,
+    matchAnyPost: true,
+    matchAnyWord: true,
+    keywords: [],
+    dmTriggerEnabled: true,
+    dmFallback: true,
+    requireFollow: false,
+    dmMessage: "Menu: reply SKILLS",
+  };
+
+  function messageJob(text: string) {
+    return {
+      name: "process-message",
+      data: {
+        instagramAccountId: "ig_456",
+        messageId: "mid_menu",
+        messageText: text,
+        senderId: "commenter_999",
+      },
+      id: "message_job_menu",
+      attemptsMade: 0,
+    };
+  }
+
+  function recentFallback(found: boolean) {
+    mockPrisma.dmLog.findFirst.mockImplementation(
+      async (args: { where?: { createdAt?: unknown } } = {}) =>
+        args.where?.createdAt ? (found ? { id: "log_old" } : null) : { commenterName: "commenter_user" }
+    );
+  }
+
+  beforeEach(() => {
+    mockPrisma.automation.findMany.mockResolvedValue([keywordCampaign, fallbackCampaign]);
+    recentFallback(false);
+  });
+
+  it("answers with the keyword campaign only when a keyword matches", async () => {
+    const processor = getProcessor();
+    await processor(messageJob("SKILLS please"));
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessage).toHaveBeenCalledWith(
+      "decrypted_token", "ig_456", "commenter_999", "SKILLS guide"
+    );
+  });
+
+  it("sends the menu when no keyword matches", async () => {
+    mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
+    const processor = getProcessor();
+    await processor(messageJob("hi"));
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessage).toHaveBeenCalledWith(
+      "decrypted_token", "ig_456", "commenter_999", "Menu: reply SKILLS"
+    );
+  });
+
+  it("sends the menu at most once per sender per 24 hours", async () => {
+    mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
+    recentFallback(true);
+    const processor = getProcessor();
+    await processor(messageJob("thanks!"));
+
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
   });
 });

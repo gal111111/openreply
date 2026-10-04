@@ -16,6 +16,7 @@ export const createAutomationSchema = z
     keywords: z.array(z.string().min(1).max(50)).max(10).optional().default([]),
     matchAnyWord: z.boolean().optional().default(false),
     dmTriggerEnabled: z.boolean().optional().default(false),
+    dmFallback: z.boolean().optional().default(false),
     dmMessage: z.string().min(1).max(1000),
     openingDmEnabled: z.boolean().optional().default(false),
     openingDmMessage: z.string().max(1000).optional().nullable(),
@@ -100,7 +101,8 @@ export function buildAutomationCreateFields(data: CreateAutomationInput) {
     matchAnyPost,
     keywords: matchAnyWord ? [] : data.keywords,
     matchAnyWord,
-    dmTriggerEnabled: data.dmTriggerEnabled,
+    dmTriggerEnabled: data.dmTriggerEnabled || data.dmFallback,
+    dmFallback: data.dmFallback,
     dmMessage: data.dmMessage,
     openingDmEnabled,
     openingDmMessage: openingDmEnabled

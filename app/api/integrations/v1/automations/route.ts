@@ -41,7 +41,8 @@ const bodySchema = z
     external_id: z.string().trim().min(1).max(200),
     workspace: z.string().trim().min(1).optional().nullable(),
     instagram_account: z.string().trim().min(1),
-    post_url: z.string().url(),
+    // Required unless dm_fallback: a DM catch-all has no post.
+    post_url: z.string().url().optional().nullable(),
     // Optional: the media id, when the caller already knows it. Skips the lookup.
     post_id: z.string().trim().min(1).optional().nullable(),
     keywords: z.array(z.string().trim().min(1).max(50)).max(10).optional().default([]),
@@ -49,6 +50,9 @@ const bodySchema = z
     match_any_comment: z.boolean().optional().default(false),
     // Also fire when someone DMs one of the keywords.
     dm_trigger: z.boolean().optional().default(false),
+    // Answer DMs that no keyword campaign matched (e.g. a menu of keywords), at
+    // most once per sender per 24 hours. Never answers comments.
+    dm_fallback: z.boolean().optional().default(false),
     // false matches a keyword anywhere in the text. Chinese keywords need this:
     // in "我要主頁" the keyword touches other letters and never matches as a word.
     whole_word: z.boolean().optional().default(true),
@@ -68,7 +72,20 @@ const bodySchema = z
       .optional()
       .nullable(),
   })
-  .refine((b) => b.match_any_comment || b.keywords.length >= 1, {
+  .refine((b) => b.dm_fallback || Boolean(b.post_url), {
+    message: "需要 post_url（只有 dm_fallback 不需要）",
+    path: ["post_url"],
+  })
+  .refine(
+    (b) =>
+      !b.dm_fallback ||
+      (!b.match_any_comment && !b.dm_trigger && !b.public_replies?.length && !b.keywords.length),
+    {
+      message: "dm_fallback 只回覆未配中關鍵字的私信，不能與其他觸發或公開回覆同用",
+      path: ["dm_fallback"],
+    }
+  )
+  .refine((b) => b.dm_fallback || b.match_any_comment || b.keywords.length >= 1, {
     message: "keywords 至少一個，或設 match_any_comment",
     path: ["keywords"],
   })
@@ -179,8 +196,8 @@ export async function POST(request: NextRequest) {
   // Resolve the media id the comment matcher needs. A resend for the same
   // post reuses the stored id rather than calling Instagram again.
   let postId = body.post_id ?? null;
-  let postUrl = body.post_url;
-  if (!postId) {
+  let postUrl = body.post_url ?? null;
+  if (!postId && body.post_url && !body.dm_fallback) {
     const shortcode = instagramShortcode(body.post_url);
     if (!shortcode) {
       return jsonError("post_url 不是有效的 Instagram 貼文網址。", 422);
@@ -221,7 +238,12 @@ export async function POST(request: NextRequest) {
   const sourceSystem = body.source?.system?.trim() || auth.caller;
   const sourceRef = body.source?.production_id?.trim() || null;
   const defaultName = `${sourceSystem}：${
-    sourceRef ?? (body.match_any_comment ? "任何評論" : body.keywords.join("、"))
+    sourceRef ??
+    (body.dm_fallback
+      ? "私信選單"
+      : body.match_any_comment
+        ? "任何評論"
+        : body.keywords.join("、"))
   }`.slice(0, 100);
   const publicReplies = body.public_replies;
 
@@ -229,11 +251,15 @@ export async function POST(request: NextRequest) {
   const parsed = createAutomationSchema.safeParse({
     name: body.name ?? defaultName,
     instagramAccountId: account.id,
-    postId,
-    postUrl,
+    postId: body.dm_fallback ? null : postId,
+    postUrl: body.dm_fallback ? null : postUrl,
+    // A catch-all is stored as any post / any word; dmFallback keeps it off
+    // comments and makes it answer only DMs no keyword campaign matched.
+    matchAnyPost: body.dm_fallback,
     keywords: body.keywords,
-    matchAnyWord: body.match_any_comment,
+    matchAnyWord: body.match_any_comment || body.dm_fallback,
     dmTriggerEnabled: body.dm_trigger,
+    dmFallback: body.dm_fallback,
     wholeWordMatch: body.whole_word,
     publicReplyEnabled: Boolean(publicReplies?.length),
     publicReplyMessages: publicReplies ?? [],
@@ -258,11 +284,12 @@ export async function POST(request: NextRequest) {
           postId: fields.postId,
           postUrl: fields.postUrl,
           pendingNextReel: false,
-          matchAnyPost: false,
+          matchAnyPost: fields.matchAnyPost,
           matchAnyWord: fields.matchAnyWord,
           keywords: fields.keywords,
           wholeWordMatch: fields.wholeWordMatch,
           dmTriggerEnabled: fields.dmTriggerEnabled,
+          dmFallback: fields.dmFallback,
           ...(publicReplies !== undefined
             ? {
                 publicReplyEnabled: fields.publicReplyEnabled,
@@ -368,6 +395,7 @@ export async function GET(request: NextRequest) {
       keywords: true,
       matchAnyWord: true,
       dmTriggerEnabled: true,
+      dmFallback: true,
       wholeWordMatch: true,
       publicReplyEnabled: true,
       publicReplyMessages: true,
@@ -403,7 +431,8 @@ export async function GET(request: NextRequest) {
       post_id: automation.postId,
       keywords: automation.keywords,
       match_any_comment: automation.matchAnyWord,
-      dm_trigger: automation.dmTriggerEnabled,
+      dm_trigger: automation.dmTriggerEnabled && !automation.dmFallback,
+      dm_fallback: automation.dmFallback,
       whole_word: automation.wholeWordMatch,
       public_replies: automation.publicReplyEnabled
         ? automation.publicReplyMessages

@@ -51,6 +51,8 @@ import {
 } from "@/lib/zernio/client";
 
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
+// A DM catch-all campaign answers the same person at most once in this window.
+const DM_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 function formatError(error: unknown): string {
   if (error instanceof MetaApiError) {
@@ -242,6 +244,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         { matchAnyPost: true },
       ],
       isActive: true,
+      // A DM catch-all is stored as any-post/any-word but must never answer comments.
+      dmFallback: false,
       instagramAccount: {
         instagramId: instagramAccountId,
       },
@@ -393,8 +397,11 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       });
     }
 
-    // Public reply leg — decoupled from the DM and posted first so a DM failure
-    // (e.g. a non-follower whose messaging is restricted) never suppresses it.
+    // Public reply leg. Posted only once a DM has reached the commenter (sent
+    // now, sent on an earlier pass, or sent by another campaign that used the
+    // comment's one private reply): the replies say "DM'd you", which must not
+    // be posted under a comment whose DM failed. A failed DM is retried by the
+    // job and by the comment sweep, and the reply follows when it lands.
     // Idempotent across retries via publicReplySentAt.
     const replyPool =
       automation.publicReplyMessages.length > 0
@@ -402,12 +409,15 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         : automation.publicReplyMessage
           ? [automation.publicReplyMessage]
           : [];
-    if (
-      automation.publicReplyEnabled &&
-      replyPool.length > 0 &&
-      !existingLog?.publicReplySentAt &&
-      !existingLog?.publicReplyDeliveryUnconfirmed
-    ) {
+    const sendPublicReply = async () => {
+      if (
+        !automation.publicReplyEnabled ||
+        replyPool.length === 0 ||
+        existingLog?.publicReplySentAt ||
+        existingLog?.publicReplyDeliveryUnconfirmed
+      ) {
+        return;
+      }
       try {
         const chosen = replyPool[Math.floor(Math.random() * replyPool.length)];
         const publicReply = renderMessageWithTracking({
@@ -444,11 +454,14 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           })
           .catch(() => {});
       }
-    }
+    };
 
-    // DM already sent on an earlier pass; the public reply retry above was all
-    // this run needed. Don't re-send the DM.
-    if (!needsDm) continue;
+    // DM already sent on an earlier pass: only the public reply may still be
+    // missing. Don't re-send the DM.
+    if (!needsDm) {
+      await sendPublicReply();
+      continue;
+    }
 
     // Meta allows exactly ONE private reply per comment, ever — across every
     // campaign. When several campaigns match the same comment (duplicated
@@ -456,7 +469,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // the first can deliver; the rest would fail with "The comment is invalid
     // for a private reply". Skip them explicitly instead of burning an API call
     // and logging a failure the user can do nothing about. The public reply
-    // above still goes out per campaign — only the DM leg is deduped.
+    // still goes out per campaign — the commenter did get a DM.
     const privateReplyUsedBy = await prisma.dmLog.findFirst({
       where: {
         commentId,
@@ -476,6 +489,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage: `Another campaign (${privateReplyUsedBy.automation?.name ?? "unknown"}) already sent the one private reply Instagram allows for this comment`,
         },
       });
+      await sendPublicReply();
       continue;
     }
 
@@ -742,6 +756,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       });
       throw error;
     }
+
+    // The DM is out, so the public "DM'd you" reply is now true.
+    await sendPublicReply();
   }
 }
 
@@ -1134,17 +1151,45 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
 
   const dedupeId = `dm:${messageId}`;
 
-  for (const automation of automations) {
-    const matchResult = automation.matchAnyWord
-      ? { matched: true, matchedKeyword: null }
-      : matchKeywords(
-          messageText,
-          automation.keywords,
-          automation.wholeWordMatch
-        );
+  const targets = automations
+    .filter((automation) => !automation.dmFallback)
+    .map((automation) => ({
+      automation,
+      matchResult: automation.matchAnyWord
+        ? { matched: true, matchedKeyword: null }
+        : matchKeywords(
+            messageText,
+            automation.keywords,
+            automation.wholeWordMatch
+          ),
+    }))
+    .filter((target) => target.matchResult.matched);
 
-    if (!matchResult.matched) continue;
+  // No keyword campaign answered: the catch-all (a menu of the keywords) may,
+  // at most once per sender per 24 hours, so an ongoing conversation is not
+  // answered on every message. A retry of this same message is not "recent".
+  if (targets.length === 0) {
+    const fallback = automations.find((automation) => automation.dmFallback);
+    const recent =
+      fallback &&
+      (await prisma.dmLog.findFirst({
+        where: {
+          automationId: fallback.id,
+          commenterId: senderId,
+          commentId: { not: dedupeId },
+          createdAt: { gte: new Date(Date.now() - DM_FALLBACK_COOLDOWN_MS) },
+        },
+        select: { id: true },
+      }));
+    if (fallback && !recent) {
+      targets.push({
+        automation: fallback,
+        matchResult: { matched: true, matchedKeyword: null },
+      });
+    }
+  }
 
+  for (const { automation, matchResult } of targets) {
     const existingLog = await prisma.dmLog.findUnique({
       where: {
         automationId_commentId: {

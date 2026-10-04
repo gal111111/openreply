@@ -88,7 +88,8 @@ function errMessage(error: unknown): string {
 /** One reconciliation pass across every active campaign. */
 export async function reconcileComments(): Promise<void> {
   const automations = await prisma.automation.findMany({
-    where: { isActive: true },
+    // DM catch-alls are stored as any-post campaigns but never answer comments.
+    where: { isActive: true, dmFallback: false },
     select: {
       id: true,
       name: true,
