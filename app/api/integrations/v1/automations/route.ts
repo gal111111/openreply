@@ -26,33 +26,62 @@ import { instagramShortcode } from "@/lib/utils/csv";
 
 // HobbyLand integration spec v1, section 1: the Hub creates a comment-keyword
 // DM campaign after it publishes a post. Idempotent by external_id.
+//
+// v1.2 adds the two shapes the publish pipeline needs: a campaign that answers
+// every comment on its post (match_any_comment, usually with public_replies),
+// and one that answers a DM keyword (dm_trigger). A DM trigger always needs
+// keywords, so this route can never create a campaign that answers every DM.
 
 export const dynamic = "force-dynamic";
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
-const bodySchema = z.object({
-  external_id: z.string().trim().min(1).max(200),
-  workspace: z.string().trim().min(1).optional().nullable(),
-  instagram_account: z.string().trim().min(1),
-  post_url: z.string().url(),
-  // Optional: the media id, when the caller already knows it. Skips the lookup.
-  post_id: z.string().trim().min(1).optional().nullable(),
-  keywords: z.array(z.string().trim().min(1).max(50)).min(1).max(10),
-  dm_message: z.string().trim().min(1).max(1000),
-  // Omitted leaves an existing link as it is; null or "" removes it.
-  link_url: z.union([z.string().url(), z.literal("")]).optional().nullable(),
-  active: z.boolean().optional().default(true),
-  name: z.string().trim().min(1).max(100).optional().nullable(),
-  source: z
-    .object({
-      system: z.string().trim().max(50).optional().nullable(),
-      production_id: z.string().trim().max(200).optional().nullable(),
-    })
-    .passthrough()
-    .optional()
-    .nullable(),
-});
+const bodySchema = z
+  .object({
+    external_id: z.string().trim().min(1).max(200),
+    workspace: z.string().trim().min(1).optional().nullable(),
+    instagram_account: z.string().trim().min(1),
+    post_url: z.string().url(),
+    // Optional: the media id, when the caller already knows it. Skips the lookup.
+    post_id: z.string().trim().min(1).optional().nullable(),
+    keywords: z.array(z.string().trim().min(1).max(50)).max(10).optional().default([]),
+    // Fire on every comment on the post; keywords are then ignored for comments.
+    match_any_comment: z.boolean().optional().default(false),
+    // Also fire when someone DMs one of the keywords.
+    dm_trigger: z.boolean().optional().default(false),
+    // false matches a keyword anywhere in the text. Chinese keywords need this:
+    // in "我要主頁" the keyword touches other letters and never matches as a word.
+    whole_word: z.boolean().optional().default(true),
+    // Omitted keeps whatever the dashboard has; [] turns public replies off.
+    public_replies: z.array(z.string().trim().min(1).max(1000)).max(10).optional(),
+    dm_message: z.string().trim().min(1).max(1000),
+    // Omitted leaves an existing link as it is; null or "" removes it.
+    link_url: z.union([z.string().url(), z.literal("")]).optional().nullable(),
+    active: z.boolean().optional().default(true),
+    name: z.string().trim().min(1).max(100).optional().nullable(),
+    source: z
+      .object({
+        system: z.string().trim().max(50).optional().nullable(),
+        production_id: z.string().trim().max(200).optional().nullable(),
+      })
+      .passthrough()
+      .optional()
+      .nullable(),
+  })
+  .refine((b) => b.match_any_comment || b.keywords.length >= 1, {
+    message: "keywords 至少一個，或設 match_any_comment",
+    path: ["keywords"],
+  })
+  .refine((b) => !b.dm_trigger || b.keywords.length >= 1, {
+    message: "dm_trigger 需要 keywords（不支援回覆所有私信）",
+    path: ["dm_trigger"],
+  })
+  // An any-word campaign stores no keywords, so a DM trigger on it would answer
+  // every DM. Callers send the two as separate campaigns.
+  .refine((b) => !(b.match_any_comment && b.dm_trigger), {
+    message: "match_any_comment 與 dm_trigger 不能同時開，請分成兩個活動",
+    path: ["dm_trigger"],
+  });
 
 function jsonError(error: string, status: number, details?: unknown) {
   return NextResponse.json(
@@ -191,7 +220,10 @@ export async function POST(request: NextRequest) {
     body.link_url === undefined ? undefined : (body.link_url ?? "");
   const sourceSystem = body.source?.system?.trim() || auth.caller;
   const sourceRef = body.source?.production_id?.trim() || null;
-  const defaultName = `${sourceSystem}：${sourceRef ?? body.keywords.join("、")}`.slice(0, 100);
+  const defaultName = `${sourceSystem}：${
+    sourceRef ?? (body.match_any_comment ? "任何評論" : body.keywords.join("、"))
+  }`.slice(0, 100);
+  const publicReplies = body.public_replies;
 
   // Same validation and field rules as campaigns created in the dashboard.
   const parsed = createAutomationSchema.safeParse({
@@ -200,6 +232,11 @@ export async function POST(request: NextRequest) {
     postId,
     postUrl,
     keywords: body.keywords,
+    matchAnyWord: body.match_any_comment,
+    dmTriggerEnabled: body.dm_trigger,
+    wholeWordMatch: body.whole_word,
+    publicReplyEnabled: Boolean(publicReplies?.length),
+    publicReplyMessages: publicReplies ?? [],
     dmMessage: body.dm_message,
     trackedDestinationUrl: linkUrl,
     isActive: body.active,
@@ -214,7 +251,7 @@ export async function POST(request: NextRequest) {
       const campaign = await tx.automation.update({
         where: { id: automationId },
         // Only the fields the caller owns. Settings changed in the dashboard
-        // (public reply, follow gate, follow-up, name) are kept.
+        // (follow gate, follow-up, name, and public replies unless sent) are kept.
         data: {
           ...(body.name ? { name: fields.name } : {}),
           instagramAccountId: account.id,
@@ -222,8 +259,17 @@ export async function POST(request: NextRequest) {
           postUrl: fields.postUrl,
           pendingNextReel: false,
           matchAnyPost: false,
-          matchAnyWord: false,
+          matchAnyWord: fields.matchAnyWord,
           keywords: fields.keywords,
+          wholeWordMatch: fields.wholeWordMatch,
+          dmTriggerEnabled: fields.dmTriggerEnabled,
+          ...(publicReplies !== undefined
+            ? {
+                publicReplyEnabled: fields.publicReplyEnabled,
+                publicReplyMessages: fields.publicReplyMessages,
+                publicReplyMessage: fields.publicReplyMessage,
+              }
+            : {}),
           dmMessage: fields.dmMessage,
           isActive: fields.isActive,
           sourceSystem,
@@ -320,6 +366,11 @@ export async function GET(request: NextRequest) {
       postId: true,
       postUrl: true,
       keywords: true,
+      matchAnyWord: true,
+      dmTriggerEnabled: true,
+      wholeWordMatch: true,
+      publicReplyEnabled: true,
+      publicReplyMessages: true,
       dmMessage: true,
       isActive: true,
       sourceSystem: true,
@@ -351,6 +402,12 @@ export async function GET(request: NextRequest) {
       post_url: automation.postUrl,
       post_id: automation.postId,
       keywords: automation.keywords,
+      match_any_comment: automation.matchAnyWord,
+      dm_trigger: automation.dmTriggerEnabled,
+      whole_word: automation.wholeWordMatch,
+      public_replies: automation.publicReplyEnabled
+        ? automation.publicReplyMessages
+        : [],
       dm_message: automation.dmMessage,
       link_url: automation.trackedLinks[0]?.destinationUrl ?? null,
       dm_count: automation._count.dmLogs,

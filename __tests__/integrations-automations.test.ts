@@ -214,6 +214,91 @@ describe("POST /api/integrations/v1/automations", () => {
     const res = await POST(post({ ...payload, keywords: [] }));
     expect(res.status).toBe(400);
   });
+
+  it("creates an every-comment campaign with public replies", async () => {
+    const { keywords: _omit, ...rest } = payload;
+    void _omit;
+    const res = await POST(
+      post({
+        ...rest,
+        external_id: "ig:DeDQ8:comment",
+        match_any_comment: true,
+        public_replies: ["私信你啦 📩", "私信你啦 🙌"],
+      })
+    );
+    expect(res.status).toBe(201);
+    const data = mockPrisma.automation.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({
+      matchAnyWord: true,
+      keywords: [],
+      dmTriggerEnabled: false,
+      publicReplyEnabled: true,
+      publicReplyMessages: ["私信你啦 📩", "私信你啦 🙌"],
+      publicReplyMessage: "私信你啦 📩",
+      name: "hub：vp-123",
+    });
+  });
+
+  it("creates a DM-keyword campaign with partial matching", async () => {
+    const res = await POST(
+      post({
+        ...payload,
+        external_id: "ig:DeDQ8:dm",
+        keywords: ["主頁"],
+        dm_trigger: true,
+        whole_word: false,
+      })
+    );
+    expect(res.status).toBe(201);
+    const data = mockPrisma.automation.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({
+      matchAnyWord: false,
+      keywords: ["主頁"],
+      dmTriggerEnabled: true,
+      wholeWordMatch: false,
+      publicReplyEnabled: false,
+    });
+  });
+
+  it("never creates a campaign that would answer every DM", async () => {
+    const { keywords: _omit, ...rest } = payload;
+    void _omit;
+    // A DM trigger without keywords.
+    expect((await POST(post({ ...rest, dm_trigger: true }))).status).toBe(400);
+    // Any-comment plus DM trigger: the any-word campaign stores no keywords.
+    expect(
+      (await POST(post({ ...payload, match_any_comment: true, dm_trigger: true }))).status
+    ).toBe(400);
+    expect(mockPrisma.automation.create).not.toHaveBeenCalled();
+  });
+
+  it("an update keeps dashboard public replies unless the caller sends them", async () => {
+    const body = {
+      ...payload,
+      external_id: "ig:DeDQ8:comment",
+      keywords: [],
+      match_any_comment: true,
+      public_replies: ["私信你啦 📩"],
+    };
+    const first = await (await POST(post(body))).json();
+    // Someone edits the replies in the dashboard.
+    store.set(first.id, { ...store.get(first.id)!, publicReplyMessages: ["改過的回覆"] });
+
+    const { public_replies: _omit, ...withoutReplies } = body;
+    void _omit;
+    expect((await POST(post({ ...withoutReplies, dm_message: "新內容" }))).status).toBe(200);
+    expect(store.get(first.id)).toMatchObject({
+      publicReplyMessages: ["改過的回覆"],
+      dmMessage: "新內容",
+      matchAnyWord: true,
+    });
+
+    expect((await POST(post({ ...body, public_replies: [] }))).status).toBe(200);
+    expect(store.get(first.id)).toMatchObject({
+      publicReplyEnabled: false,
+      publicReplyMessages: [],
+    });
+  });
 });
 
 describe("GET /api/integrations/v1/automations", () => {
