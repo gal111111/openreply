@@ -57,6 +57,27 @@ interface SweepStat {
   errors: string[];
 }
 
+/**
+ * True when a comment or reply author is the connected account itself.
+ *
+ * The id alone is not enough: with Instagram Login the comment API can return
+ * an id that differs from the professional-account id the webhooks use, so the
+ * owner's own replies went unrecognised and an already-answered comment was
+ * public-replied again on every sweep. The username is stable across both.
+ */
+export function isFromAccount(
+  from: { id?: string; username?: string } | undefined,
+  account: { instagramId: string; username: string }
+): boolean {
+  if (!from) return false;
+  if (from.id && from.id === account.instagramId) return true;
+  return Boolean(
+    from.username &&
+      account.username &&
+      from.username.toLowerCase() === account.username.toLowerCase()
+  );
+}
+
 function errMessage(error: unknown): string {
   if (error instanceof MetaApiError)
     return `Meta ${error.code}: ${error.message}`;
@@ -205,8 +226,7 @@ async function sweepCampaign({
     // Keep only comments that (a) aren't the account's own, (b) match the
     // keyword, and (c) have no reply from the account owner yet.
     const needsAction = comments.filter((c) => {
-      const authorId = c.from?.id;
-      if (!authorId || authorId === account.instagramId) return false;
+      if (!c.from?.id || isFromAccount(c.from, account)) return false;
 
       const matched = automation.matchAnyWord
         ? true
@@ -218,8 +238,8 @@ async function sweepCampaign({
       if (!matched) return false;
       stat.matched += 1;
 
-      const ownerReplied = (c.replies?.data ?? []).some(
-        (r) => r.from?.id === account.instagramId
+      const ownerReplied = (c.replies?.data ?? []).some((r) =>
+        isFromAccount(r.from, account)
       );
       if (ownerReplied) {
         stat.alreadyReplied += 1;

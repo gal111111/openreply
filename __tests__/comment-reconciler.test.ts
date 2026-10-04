@@ -48,3 +48,24 @@ describe("adMediaFor", () => {
     await expect(adMediaFor(POST)).resolves.toEqual([]);
   });
 });
+
+import { isFromAccount } from "../lib/polling/comment-reconciler";
+
+describe("isFromAccount", () => {
+  const account = { instagramId: "17841447622663424", username: "skillaihk" };
+
+  it("matches the professional-account id", () => {
+    expect(isFromAccount({ id: "17841447622663424" }, account)).toBe(true);
+  });
+
+  it("matches the username when the comment API returns a different id", () => {
+    // Instagram Login returned another id for the owner's own reply, so an
+    // answered comment was public-replied again on every sweep.
+    expect(isFromAccount({ id: "9988", username: "SkillAIHK" }, account)).toBe(true);
+  });
+
+  it("does not match someone else", () => {
+    expect(isFromAccount({ id: "123", username: "arhoi0814" }, account)).toBe(false);
+    expect(isFromAccount(undefined, account)).toBe(false);
+  });
+});
