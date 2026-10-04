@@ -20,7 +20,10 @@ export default async function DashboardLayout({
   const session = await auth();
 
   if (!session?.user?.id) {
-    redirect("/login");
+    // The proxy only checks that a session cookie exists; this is where an
+    // invalid one is caught. The flag lets the proxy clear it instead of
+    // sending /login straight back here.
+    redirect("/login?session=expired");
   }
 
   const workspace = await ensureWorkspaceForUser(
