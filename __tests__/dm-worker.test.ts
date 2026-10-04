@@ -866,10 +866,14 @@ describe("DM Worker — Full Pipeline", () => {
 
 describe("DM Worker — one private reply per comment", () => {
   it("should skip a campaign when another already used the comment's private reply", async () => {
+    // Only the cross-campaign lookup (automationId: { not: … }) finds a SENT
+    // log; the same-campaign "already answered this person" lookup does not.
     mockPrisma.dmLog.findFirst.mockImplementation(
-      async (args: { where?: { status?: string } } = {}) =>
+      async (args: { where?: { status?: string; automationId?: unknown } } = {}) =>
         args.where?.status === "SENT"
-          ? { automation: { name: "openreply 1" } }
+          ? typeof args.where.automationId === "object"
+            ? { automation: { name: "openreply 1" } }
+            : null
           : { commenterName: "commenter_user" }
     );
 
@@ -1438,8 +1442,10 @@ describe("DM Worker — public reply only after the DM", () => {
   it("still replies when another campaign already sent the comment's DM", async () => {
     const { sendCommentReply } = await import("@/lib/meta/client");
     mockPrisma.dmLog.findFirst.mockImplementation(
-      async (args: { where?: { status?: string } } = {}) =>
-        args.where?.status === "SENT" ? { automation: { name: "other" } } : null
+      async (args: { where?: { status?: string; automationId?: unknown } } = {}) =>
+        args.where?.status === "SENT" && typeof args.where.automationId === "object"
+          ? { automation: { name: "other" } }
+          : null
     );
     const processor = getProcessor();
     await processor(createMockJob());
@@ -1523,6 +1529,85 @@ describe("DM Worker — DM catch-all (menu)", () => {
     recentFallback(true);
     const processor = getProcessor();
     await processor(messageJob("thanks!"));
+
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("DM Worker — never twice to the same customer", () => {
+  it("does not DM someone a second time for another comment on the same campaign", async () => {
+    mockPrisma.dmLog.findFirst.mockImplementation(
+      async (args: { where?: { status?: string; automationId?: unknown } } = {}) =>
+        args.where?.status === "SENT" && typeof args.where.automationId === "string"
+          ? { id: "log_earlier_comment" }
+          : null
+    );
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SKIPPED_DEDUP",
+          errorMessage: expect.stringContaining("earlier comment"),
+        }),
+      })
+    );
+  });
+
+  it("skips a comment another job is already handling", async () => {
+    const { getRedisConnection } = await import("@/lib/queue/client");
+    const set = vi.fn().mockResolvedValue(null); // NX failed: lock held elsewhere
+    vi.mocked(getRedisConnection).mockReturnValue({ set, del: vi.fn() } as never);
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(set).toHaveBeenCalledWith(
+      "openreply:comment-lock:ig_456:comment_555", "1", "EX", 300, "NX"
+    );
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    vi.mocked(getRedisConnection).mockReset();
+  });
+
+  it("releases the lock after handling the comment", async () => {
+    const { getRedisConnection } = await import("@/lib/queue/client");
+    const del = vi.fn().mockResolvedValue(1);
+    vi.mocked(getRedisConnection).mockReturnValue({ set: vi.fn().mockResolvedValue("OK"), del } as never);
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    expect(del).toHaveBeenCalledWith("openreply:comment-lock:ig_456:comment_555");
+    vi.mocked(getRedisConnection).mockReset();
+  });
+
+  it("never answers a commenter on the ignore list", async () => {
+    process.env.OPENREPLY_IGNORE_COMMENTERS = "@someone, Commenter_User";
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    delete process.env.OPENREPLY_IGNORE_COMMENTERS;
+  });
+
+  it("does not answer the same DM keyword twice within the hour", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...mockAutomation, dmTriggerEnabled: true, requireFollow: false },
+    ]);
+    mockPrisma.dmLog.findFirst.mockImplementation(
+      async (args: { where?: { status?: string; createdAt?: unknown } } = {}) =>
+        args.where?.status === "SENT" && args.where.createdAt ? { id: "log_recent" } : null
+    );
+    const processor = getProcessor();
+    await processor({
+      name: "process-message",
+      data: { instagramAccountId: "ig_456", messageId: "mid_again", messageText: "LINK", senderId: "commenter_999" },
+      id: "message_job_again",
+      attemptsMade: 0,
+    });
 
     expect(mockSendDirectMessage).not.toHaveBeenCalled();
   });

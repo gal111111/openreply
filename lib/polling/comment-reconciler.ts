@@ -38,6 +38,7 @@ import {
   type InstagramContext,
 } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
+import { isIgnoredCommenter } from "@/lib/utils/ignored-commenters";
 
 // Only consider comments from the last few days — older ones are outside
 // Instagram's private-reply window anyway, so a DM to them would just fail.
@@ -47,6 +48,8 @@ const LOOKBACK_HOURS = Number(process.env.COMMENT_POLL_LOOKBACK_HOURS ?? 72);
 const MAX_NEW_PER_SWEEP = Number(process.env.COMMENT_POLL_MAX_PER_SWEEP ?? 30);
 // For "any post" campaigns, how many recent posts to scan.
 const RECENT_MEDIA_LIMIT = 10;
+// How long the sweep keeps re-queuing a comment whose DM failed.
+const FAILED_RETRY_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 interface SweepStat {
   campaign: string;
@@ -116,12 +119,17 @@ export async function reconcileComments(): Promise<void> {
 
   const sinceMs = Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000;
   const tokenCache = new Map<string, InstagramContext | null>();
+  // One job per comment per sweep: the worker answers every campaign that
+  // matches a comment in one job, so a post covered by two campaigns must not
+  // queue the comment twice (two concurrent jobs double-posted public replies).
+  const queuedThisSweep = new Set<string>();
 
   for (const automation of automations) {
     const stat = await sweepCampaign({
       automation: automation,
       sinceMs: sinceMs,
       tokenCache: tokenCache,
+      queuedThisSweep: queuedThisSweep,
     }).catch(
       (error): SweepStat => ({
         campaign: automation.name,
@@ -140,6 +148,7 @@ async function sweepCampaign({
   automation,
   sinceMs,
   tokenCache,
+  queuedThisSweep,
 }: {
   automation: {
     id: string;
@@ -162,6 +171,7 @@ async function sweepCampaign({
   };
   sinceMs: number;
   tokenCache: Map<string, InstagramContext | null>;
+  queuedThisSweep: Set<string>;
 }): Promise<SweepStat> {
   const account = automation.instagramAccount;
   const stat: SweepStat = {
@@ -228,6 +238,7 @@ async function sweepCampaign({
     // keyword, and (c) have no reply from the account owner yet.
     const needsAction = comments.filter((c) => {
       if (!c.from?.id || isFromAccount(c.from, account)) return false;
+      if (isIgnoredCommenter(c.from.username)) return false;
 
       const matched = automation.matchAnyWord
         ? true
@@ -260,9 +271,20 @@ async function sweepCampaign({
       where: {
         automationId: automation.id,
         commentId: { in: needsAction.map((c) => c.id) },
-        AND: [
-          { OR: [{ status: "SENT" }, { dmDeliveryUnconfirmed: true }] },
-          ...(automation.publicReplyEnabled ? [{ OR: [{ publicReplySentAt: { not: null } }, { publicReplyDeliveryUnconfirmed: true }] }] : []),
+        OR: [
+          {
+            AND: [
+              { OR: [{ status: "SENT" }, { dmDeliveryUnconfirmed: true }] },
+              ...(automation.publicReplyEnabled ? [{ OR: [{ publicReplySentAt: { not: null } }, { publicReplyDeliveryUnconfirmed: true }] }] : []),
+            ],
+          },
+          // Another campaign used the comment's one private reply, or this
+          // campaign already answered the same person: nothing left to send.
+          { status: "SKIPPED_DEDUP" },
+          // Stop retrying a failed DM after a while. Meta has reported an
+          // error for a DM that did arrive (2026-10-04), so endless retries
+          // risk nothing but noise; a real failure shows in the DM log.
+          { status: "FAILED", createdAt: { lt: new Date(Date.now() - FAILED_RETRY_WINDOW_MS) } },
         ],
       },
       select: { commentId: true },
@@ -276,6 +298,8 @@ async function sweepCampaign({
       .slice(0, MAX_NEW_PER_SWEEP);
 
     for (const c of fresh) {
+      if (queuedThisSweep.has(c.id)) continue;
+      queuedThisSweep.add(c.id);
       // No deterministic jobId here: a retained completed/failed job from an
       // earlier sweep would otherwise be treated as a duplicate and silently
       // drop this add, so the comment would never be retried. Dedup is handled

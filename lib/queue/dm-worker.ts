@@ -32,6 +32,7 @@ import {
   type InstagramContext,
 } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
+import { isIgnoredCommenter } from "@/lib/utils/ignored-commenters";
 import { reserveDMSlot, releaseDMSlot } from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
@@ -53,6 +54,43 @@ import {
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
 // A DM catch-all campaign answers the same person at most once in this window.
 const DM_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// A keyword DM is not answered again for the same person within this window.
+const DM_REPEAT_COOLDOWN_MS = 60 * 60 * 1000;
+
+// One job at a time per comment. The comment sweep and a webhook can queue the
+// same comment at the same moment; two jobs then both posted the public reply
+// (four replies under one comment on 2026-10-04). The lock outlives any normal
+// run; it is released as soon as the job finishes.
+const COMMENT_LOCK_TTL_SECONDS = 300;
+
+function commentLockKey(instagramAccountId: string, commentId: string) {
+  return `openreply:comment-lock:${instagramAccountId}:${commentId}`;
+}
+
+async function acquireCommentLock(instagramAccountId: string, commentId: string) {
+  try {
+    const result = await getRedisConnection().set(
+      commentLockKey(instagramAccountId, commentId),
+      "1",
+      "EX",
+      COMMENT_LOCK_TTL_SECONDS,
+      "NX"
+    );
+    return result === "OK";
+  } catch {
+    // Without Redis the queue is down as well; never block a send on the lock.
+    return true;
+  }
+}
+
+async function releaseCommentLock(instagramAccountId: string, commentId: string) {
+  try {
+    await getRedisConnection().del(commentLockKey(instagramAccountId, commentId));
+  } catch {
+    // The TTL clears it.
+  }
+}
+
 
 function formatError(error: unknown): string {
   if (error instanceof MetaApiError) {
@@ -220,6 +258,20 @@ function connectionScope(data: DmQueueJob) {
 }
 
 async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
+  const { instagramAccountId, commentId, commenterName } = job.data;
+  if (isIgnoredCommenter(commenterName)) return;
+  if (!(await acquireCommentLock(instagramAccountId, commentId))) {
+    console.log(`[DM Worker] Comment ${commentId} is already being handled; skipped`);
+    return;
+  }
+  try {
+    await processCommentLocked(job);
+  } finally {
+    await releaseCommentLock(instagramAccountId, commentId);
+  }
+}
+
+async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> {
   const {
     instagramAccountId,
     commentId,
@@ -460,6 +512,31 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // missing. Don't re-send the DM.
     if (!needsDm) {
       await sendPublicReply();
+      continue;
+    }
+
+    // One DM per person per campaign: someone who comments three times on the
+    // same post gets the information once, not three DMs and three replies.
+    const answeredThisPerson = await prisma.dmLog.findFirst({
+      where: {
+        automationId: automation.id,
+        commenterId,
+        status: "SENT",
+        commentId: { not: commentId },
+      },
+      select: { id: true },
+    });
+    if (answeredThisPerson) {
+      await prisma.dmLog.update({
+        where: {
+          automationId_commentId: { automationId: automation.id, commentId },
+        },
+        data: {
+          status: "SKIPPED_DEDUP",
+          matchedKeyword: matchResult.matchedKeyword,
+          errorMessage: "This person already got this campaign's DM for an earlier comment",
+        },
+      });
       continue;
     }
 
@@ -1208,6 +1285,20 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
     ) {
       continue;
     }
+
+    // Someone who sends the same keyword again within the hour already has the
+    // answer in the thread; don't send it twice.
+    const answeredRecently = await prisma.dmLog.findFirst({
+      where: {
+        automationId: automation.id,
+        commenterId: senderId,
+        status: "SENT",
+        commentId: { not: dedupeId },
+        createdAt: { gte: new Date(Date.now() - DM_REPEAT_COOLDOWN_MS) },
+      },
+      select: { id: true },
+    });
+    if (answeredRecently) continue;
 
     const logBase = {
       workspaceId: automation.workspaceId,
