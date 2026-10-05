@@ -28,6 +28,7 @@
 import { prisma } from "@/lib/db/client";
 import { getDMQueue } from "@/lib/queue/client";
 import {
+  getCommentReplies,
   getRecentMediaComments,
   getUserMedia,
   MetaApiError,
@@ -38,7 +39,7 @@ import {
   type InstagramContext,
 } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
-import { isIgnoredCommenter } from "@/lib/utils/ignored-commenters";
+import { isIgnoredComment, isIgnoredCommenter } from "@/lib/utils/ignored-commenters";
 
 // Only consider comments from the last few days — older ones are outside
 // Instagram's private-reply window anyway, so a DM to them would just fail.
@@ -241,7 +242,7 @@ async function sweepCampaign({
     const needsAction = comments.filter((c) => {
       if (!c.from?.id || isFromAccount(c.from, account)) return false;
       if (isFromAccount({ username: c.username }, account)) return false;
-      if (isIgnoredCommenter(c.from.username)) return false;
+      if (isIgnoredCommenter(c.from.username) || isIgnoredComment(c.id)) return false;
 
       const matched = automation.matchAnyWord
         ? true
@@ -312,6 +313,29 @@ async function sweepCampaign({
 
     for (const c of fresh) {
       if (queuedThisSweep.has(c.id)) continue;
+
+      // The listing does not carry replies on Instagram Login, so ask this
+      // comment directly whether the account (a person or this tool) has
+      // already answered it. A lookup failure falls back to answering, as before.
+      if (!(c.replies?.data?.length)) {
+        try {
+          const replies = await getCommentReplies({ context: accessToken, commentId: c.id });
+          if (replies.some((r) => isFromAccount(r.from, account) || isFromAccount({ username: r.username }, account))) {
+            stat.alreadyReplied += 1;
+            console.log(`[Sweep] ${automation.name}: comment ${c.id} already answered by @${account.username}; skipped`);
+            continue;
+          }
+          console.log(`[Sweep] ${automation.name}: comment ${c.id} has ${replies.length} replies, none by @${account.username}`);
+          if (replies.length > 0 && !stat.replySample) {
+            stat.replySample = JSON.stringify(
+              replies.slice(0, 3).map((r) => ({ id: r.id, username: r.username, from: r.from }))
+            ).slice(0, 300);
+          }
+        } catch (error) {
+          stat.errors.push(`Replies ${c.id}: ${errMessage(error)}`);
+        }
+      }
+
       queuedThisSweep.add(c.id);
       // No deterministic jobId here: a retained completed/failed job from an
       // earlier sweep would otherwise be treated as a duplicate and silently

@@ -1638,3 +1638,16 @@ describe("DM Worker — failed DM retry window", () => {
     expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("DM Worker — ignored single comment", () => {
+  it("never answers a comment on the ignore list, but answers the same person elsewhere", async () => {
+    process.env.OPENREPLY_IGNORE_COMMENT_IDS = "comment_555, other";
+    const processor = getProcessor();
+    await processor(createMockJob());
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+
+    await processor(createMockJob({ ...mockJobData, commentId: "comment_777" }));
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    delete process.env.OPENREPLY_IGNORE_COMMENT_IDS;
+  });
+});

@@ -32,7 +32,7 @@ import {
   type InstagramContext,
 } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
-import { isIgnoredCommenter } from "@/lib/utils/ignored-commenters";
+import { isIgnoredComment, isIgnoredCommenter } from "@/lib/utils/ignored-commenters";
 import { reserveDMSlot, releaseDMSlot } from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
@@ -261,7 +261,7 @@ function connectionScope(data: DmQueueJob) {
 
 async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
   const { instagramAccountId, commentId, commenterName } = job.data;
-  if (isIgnoredCommenter(commenterName)) return;
+  if (isIgnoredCommenter(commenterName) || isIgnoredComment(commentId)) return;
   if (!(await acquireCommentLock(instagramAccountId, commentId))) {
     console.log(`[DM Worker] Comment ${commentId} is already being handled; skipped`);
     return;

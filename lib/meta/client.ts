@@ -494,6 +494,24 @@ export async function getRecentMediaComments(
     .slice(0, max);
 }
 
+/**
+ * Replies under one comment. The comments listing (even with replies{…}
+ * requested) came back without replies on Instagram Login (2026-10-05), so the
+ * comment sweep asks each candidate comment directly before answering it.
+ */
+export async function getCommentReplies(
+  accessToken: string,
+  commentId: string
+): Promise<{ id: string; username?: string; from?: { id: string; username?: string } }[]> {
+  const url = new URL(`${instagramGraphBase()}/${commentId}/replies`);
+  url.searchParams.set("fields", "id,username,from");
+  url.searchParams.set("access_token", accessToken);
+  const page = await handleResponse<{
+    data?: { id: string; username?: string; from?: { id: string; username?: string } }[];
+  }>(await fetch(url.toString()));
+  return page.data ?? [];
+}
+
 // --- Direct message inbox (Conversations API) ---------------------------
 
 export interface InstagramParticipant {

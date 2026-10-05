@@ -10,6 +10,18 @@ type Comment = {
   replies?: Comment[];
 };
 
+/** Replies under one comment (Meta only; Zernio already includes replies in the listing). */
+export async function getCommentReplies({
+  context,
+  commentId,
+}: {
+  context: InstagramContext;
+  commentId: string;
+}): Promise<{ id: string; username?: string; from?: { id: string; username?: string } }[]> {
+  if (context.provider === "META") return meta.getCommentReplies(context.accessToken, commentId);
+  return [];
+}
+
 export async function getRecentMediaComments({
   context,
   mediaId,
