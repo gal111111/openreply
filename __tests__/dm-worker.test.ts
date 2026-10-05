@@ -1612,3 +1612,29 @@ describe("DM Worker — never twice to the same customer", () => {
     expect(mockSendDirectMessage).not.toHaveBeenCalled();
   });
 });
+
+describe("DM Worker — failed DM retry window", () => {
+  it("leaves a comment alone once its DM failed more than two hours ago", async () => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue({
+      status: "FAILED",
+      createdAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+      publicReplySentAt: null,
+    });
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
+
+  it("still retries a DM that failed recently", async () => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue({
+      status: "FAILED",
+      createdAt: new Date(Date.now() - 10 * 60 * 1000),
+      publicReplySentAt: null,
+    });
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+  });
+});

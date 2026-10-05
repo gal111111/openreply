@@ -71,11 +71,18 @@ export interface InstagramComment {
     id: string;
     username?: string;
   };
+  // Commenter's username as a top-level field. Instagram Login can leave
+  // `from` out (or give an app-scoped id) for the account's own replies.
+  username?: string;
   timestamp: string;
-  // Present when the comments query asks for replies{from}. Used to tell whether
+  // Present when the comments query asks for replies. Used to tell whether
   // the account owner has already replied to this comment.
   replies?: {
-    data?: { id: string; from?: { id: string; username?: string } }[];
+    data?: {
+      id: string;
+      username?: string;
+      from?: { id: string; username?: string };
+    }[];
   };
 }
 
@@ -456,7 +463,10 @@ export async function getRecentMediaComments(
   const results: InstagramComment[] = [];
 
   const first = new URL(`${instagramGraphBase()}/${mediaId}/comments`);
-  first.searchParams.set("fields", "id,text,timestamp,from,replies{from}");
+  first.searchParams.set(
+    "fields",
+    "id,text,timestamp,from,username,replies{id,from,username}"
+  );
   first.searchParams.set("order", "reverse_chronological");
   first.searchParams.set("limit", "50");
   first.searchParams.set("access_token", accessToken);

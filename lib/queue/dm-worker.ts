@@ -54,6 +54,8 @@ import {
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
 // A DM catch-all campaign answers the same person at most once in this window.
 const DM_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// A failed comment DM is not retried after this window (matches the sweep).
+const FAILED_RETRY_WINDOW_MS = 2 * 60 * 60 * 1000;
 // A keyword DM is not answered again for the same person within this window.
 const DM_REPEAT_COOLDOWN_MS = 60 * 60 * 1000;
 
@@ -339,6 +341,17 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
         },
       },
     });
+
+    // Same retry window as the comment sweep: after two hours a failed DM is
+    // left alone. Meta has reported errors for DMs that did arrive, so a
+    // retry can only ever duplicate or fail again.
+    if (
+      existingLog?.status === "FAILED" &&
+      existingLog.createdAt &&
+      Date.now() - new Date(existingLog.createdAt).getTime() > FAILED_RETRY_WINDOW_MS
+    ) {
+      continue;
+    }
 
     const alreadyDmd = existingLog?.status === "SENT";
     const alreadyPublicReplied = Boolean(existingLog?.publicReplySentAt);

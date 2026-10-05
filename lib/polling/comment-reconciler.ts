@@ -58,6 +58,8 @@ interface SweepStat {
   alreadyReplied: number;
   enqueued: number;
   errors: string[];
+  // Shape of replies that were not recognised as the account's (diagnostics).
+  replySample?: string;
 }
 
 /**
@@ -238,6 +240,7 @@ async function sweepCampaign({
     // keyword, and (c) have no reply from the account owner yet.
     const needsAction = comments.filter((c) => {
       if (!c.from?.id || isFromAccount(c.from, account)) return false;
+      if (isFromAccount({ username: c.username }, account)) return false;
       if (isIgnoredCommenter(c.from.username)) return false;
 
       const matched = automation.matchAnyWord
@@ -250,12 +253,22 @@ async function sweepCampaign({
       if (!matched) return false;
       stat.matched += 1;
 
-      const ownerReplied = (c.replies?.data ?? []).some((r) =>
-        isFromAccount(r.from, account)
+      const replies = c.replies?.data ?? [];
+      const ownerReplied = replies.some(
+        (r) =>
+          isFromAccount(r.from, account) ||
+          isFromAccount({ username: r.username }, account)
       );
       if (ownerReplied) {
         stat.alreadyReplied += 1;
         return false;
+      }
+      if (replies.length > 0 && !stat.replySample) {
+        // Replies exist but none is recognised as the account's: keep the
+        // shape (ids/usernames only) so a mismatch is visible in the sweep log.
+        stat.replySample = JSON.stringify(
+          replies.slice(0, 3).map((r) => ({ id: r.id, username: r.username, from: r.from }))
+        ).slice(0, 300);
       }
       return true;
     });
