@@ -201,6 +201,9 @@ model Automation {
   requireFollow           Boolean @default(false)
   followPromptMessage     String?
   followPromptButtonLabel String?
+  // Rotating variants of the follow prompt (one is picked at random); empty
+  // falls back to followPromptMessage.
+  followPromptMessages    String[] @default([])
   followUpEnabled Boolean @default(false)
   followUpMessage String?
   // Minutes to wait after the link is delivered before sending the follow-up.
@@ -249,6 +252,10 @@ model DmLog {
   status        DmStatus @default(PENDING)
   attempts      Int      @default(0)
   dmSentAt      DateTime?
+  // Set when the DM sent for this row was the "follow first" prompt rather
+  // than the content: the prompt is rate-limited per person, and a prompt must
+  // not count as "already answered" once the person follows.
+  followPromptSentAt DateTime?
   errorMessage  String?
 
   // The public comment reply is delivered independently of the DM, so its

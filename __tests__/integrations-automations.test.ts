@@ -272,6 +272,32 @@ describe("POST /api/integrations/v1/automations", () => {
     expect(mockPrisma.automation.create).not.toHaveBeenCalled();
   });
 
+  it("creates a follow-first campaign with rotating prompts", async () => {
+    const res = await POST(
+      post({
+        ...payload,
+        external_id: "igpub:follow",
+        require_follow: true,
+        follow_prompts: ["先 Follow @skillaihk 🙌", "Follow 咗就撳下面 👇"],
+        follow_button: "我已 Follow ✅",
+      })
+    );
+    expect(res.status).toBe(201);
+    const data = mockPrisma.automation.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({
+      requireFollow: true,
+      followPromptMessages: ["先 Follow @skillaihk 🙌", "Follow 咗就撳下面 👇"],
+      followPromptMessage: "先 Follow @skillaihk 🙌",
+      followPromptButtonLabel: "我已 Follow ✅",
+    });
+  });
+
+  it("an update without require_follow keeps the dashboard's follow setting", async () => {
+    const first = await (await POST(post({ ...payload, external_id: "igpub:keep", require_follow: true, follow_prompts: ["A"] }))).json();
+    expect((await POST(post({ ...payload, external_id: "igpub:keep", dm_message: "新" }))).status).toBe(200);
+    expect(store.get(first.id)).toMatchObject({ requireFollow: true, followPromptMessages: ["A"], dmMessage: "新" });
+  });
+
   it("creates a DM catch-all without a post", async () => {
     const res = await POST(
       post({

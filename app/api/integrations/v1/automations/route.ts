@@ -59,6 +59,11 @@ const bodySchema = z
     // Omitted keeps whatever the dashboard has; [] turns public replies off.
     public_replies: z.array(z.string().trim().min(1).max(1000)).max(10).optional(),
     dm_message: z.string().trim().min(1).max(1000),
+    // Only followers get dm_message; others get one of follow_prompts with a
+    // button that re-checks on tap. Omitted keeps the dashboard's setting.
+    require_follow: z.boolean().optional(),
+    follow_prompts: z.array(z.string().trim().min(1).max(640)).max(10).optional(),
+    follow_button: z.string().trim().min(1).max(20).optional(),
     // Omitted leaves an existing link as it is; null or "" removes it.
     link_url: z.union([z.string().url(), z.literal("")]).optional().nullable(),
     active: z.boolean().optional().default(true),
@@ -264,6 +269,10 @@ export async function POST(request: NextRequest) {
     publicReplyEnabled: Boolean(publicReplies?.length),
     publicReplyMessages: publicReplies ?? [],
     dmMessage: body.dm_message,
+    requireFollow: body.require_follow ?? false,
+    followPromptMessages: body.follow_prompts ?? [],
+    followPromptMessage: body.follow_prompts?.[0] ?? null,
+    followPromptButtonLabel: body.follow_button ?? null,
     trackedDestinationUrl: linkUrl,
     isActive: body.active,
   });
@@ -295,6 +304,14 @@ export async function POST(request: NextRequest) {
                 publicReplyEnabled: fields.publicReplyEnabled,
                 publicReplyMessages: fields.publicReplyMessages,
                 publicReplyMessage: fields.publicReplyMessage,
+              }
+            : {}),
+          ...(body.require_follow !== undefined
+            ? {
+                requireFollow: fields.requireFollow,
+                followPromptMessage: fields.followPromptMessage,
+                followPromptMessages: fields.followPromptMessages,
+                followPromptButtonLabel: fields.followPromptButtonLabel,
               }
             : {}),
           dmMessage: fields.dmMessage,
@@ -399,6 +416,9 @@ export async function GET(request: NextRequest) {
       wholeWordMatch: true,
       publicReplyEnabled: true,
       publicReplyMessages: true,
+      requireFollow: true,
+      followPromptMessages: true,
+      followPromptButtonLabel: true,
       dmMessage: true,
       isActive: true,
       sourceSystem: true,
@@ -437,6 +457,9 @@ export async function GET(request: NextRequest) {
       public_replies: automation.publicReplyEnabled
         ? automation.publicReplyMessages
         : [],
+      require_follow: automation.requireFollow,
+      follow_prompts: automation.followPromptMessages,
+      follow_button: automation.followPromptButtonLabel,
       dm_message: automation.dmMessage,
       link_url: automation.trackedLinks[0]?.destinationUrl ?? null,
       dm_count: automation._count.dmLogs,

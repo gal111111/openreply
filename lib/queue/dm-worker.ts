@@ -54,6 +54,35 @@ import {
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
 // A DM catch-all campaign answers the same person at most once in this window.
 const DM_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// One "follow first" prompt per person per account in this window, across all
+// campaigns, so a non-follower who comments twice or DMs two keywords is not
+// told to follow over and over.
+const FOLLOW_PROMPT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_FOLLOW_PROMPT =
+  "quick favor before i send your link. i don't make any money from this, it's free. if you want to support me, just don't unfollow after, and star the repo on github if it helps you. tap the button once you're following and i'll send it over";
+
+/** A follow prompt variant at random; the single legacy message otherwise. */
+function pickFollowPrompt(automation: {
+  followPromptMessages?: string[] | null;
+  followPromptMessage: string | null;
+}): string {
+  const pool = (automation.followPromptMessages ?? []).map((m) => m.trim()).filter(Boolean);
+  if (pool.length > 0) return pool[Math.floor(Math.random() * pool.length)];
+  return automation.followPromptMessage || DEFAULT_FOLLOW_PROMPT;
+}
+
+async function followPromptedRecently(instagramAccountRowId: string, personId: string) {
+  const recent = await prisma.dmLog.findFirst({
+    where: {
+      instagramAccountId: instagramAccountRowId,
+      commenterId: personId,
+      followPromptSentAt: { gte: new Date(Date.now() - FOLLOW_PROMPT_COOLDOWN_MS) },
+    },
+    select: { id: true },
+  });
+  return Boolean(recent);
+}
+
 // A failed comment DM is not retried after this window (matches the sweep).
 const FAILED_RETRY_WINDOW_MS = 2 * 60 * 60 * 1000;
 // A keyword DM is not answered again for the same person within this window.
@@ -536,6 +565,9 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
         commenterId,
         status: "SENT",
         commentId: { not: commentId },
+        // A "follow first" prompt is not the content: once they follow, a new
+        // comment must still get it.
+        followPromptSentAt: null,
       },
       select: { id: true },
     });
@@ -580,6 +612,49 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
         },
       });
       await sendPublicReply();
+      continue;
+    }
+
+    // With an opening DM, the private reply is a button message; tapping it
+    // fires a postback that delivers the reveal (see processPostback). Without
+    // one, we send the reveal text directly as today.
+    const useOpeningDm =
+      automation.openingDmEnabled &&
+      Boolean(automation.openingDmMessage) &&
+      Boolean(automation.openingDmButtonLabel);
+
+    // Follow-gating: the link is revealed only after a follow. When an opening
+    // DM is enabled it comes FIRST, and its button routes into the follow check
+    // (opening DM → follow gate → link). Without an opening DM, we check follow
+    // status at comment time: confirmed followers get the link now, everyone
+    // else gets the "follow me first" prompt (re-verified on tap). Meta only
+    // reveals follow status for people who have messaged the account, so a
+    // first-time commenter is unverifiable and gets the prompt.
+    let sendFollowPrompt = false;
+    if (automation.requireFollow && !useOpeningDm) {
+      const alreadyFollows = await getUserFollowStatus({
+        context: accessToken,
+        recipientId: commenterId,
+      });
+      sendFollowPrompt =
+        accessToken.provider === "ZERNIO"
+          ? alreadyFollows === false
+          : alreadyFollows !== true;
+    }
+    if (
+      sendFollowPrompt &&
+      (await followPromptedRecently(automation.instagramAccountId, commenterId))
+    ) {
+      await prisma.dmLog.update({
+        where: {
+          automationId_commentId: { automationId: automation.id, commentId },
+        },
+        data: {
+          status: "SKIPPED_DEDUP",
+          matchedKeyword: matchResult.matchedKeyword,
+          errorMessage: "This person was already asked to follow in the last 24 hours",
+        },
+      });
       continue;
     }
 
@@ -679,31 +754,6 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
       }
     }
 
-    // With an opening DM, the private reply is a button message; tapping it
-    // fires a postback that delivers the reveal (see processPostback). Without
-    // one, we send the reveal text directly as today.
-    const useOpeningDm =
-      automation.openingDmEnabled &&
-      Boolean(automation.openingDmMessage) &&
-      Boolean(automation.openingDmButtonLabel);
-
-    // Follow-gating: the link is revealed only after a follow. When an opening
-    // DM is enabled it comes FIRST, and its button routes into the follow check
-    // (opening DM → follow gate → link). Without an opening DM, we check follow
-    // status at comment time: confirmed followers get the link now, everyone
-    // else gets the "follow me first" prompt (re-verified on tap).
-    let sendFollowPrompt = false;
-    if (automation.requireFollow && !useOpeningDm) {
-      const alreadyFollows = await getUserFollowStatus({
-        context: accessToken,
-        recipientId: commenterId,
-      });
-      sendFollowPrompt =
-        accessToken.provider === "ZERNIO"
-          ? alreadyFollows === false
-          : alreadyFollows !== true;
-    }
-
     try {
       if (useOpeningDm) {
         const openingText = renderMessageWithTracking({
@@ -724,9 +774,7 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
         });
       } else if (sendFollowPrompt) {
         const promptText = renderMessageWithoutLink({
-          message:
-            automation.followPromptMessage ||
-            "quick favor before i send your link. i don't make any money from this, it's free. if you want to support me, just don't unfollow after, and star the repo on github if it helps you. tap the button once you're following and i'll send it over",
+          message: pickFollowPrompt(automation),
           commenterName,
         });
         await sendPrivateReplyWithButton({
@@ -815,6 +863,7 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
         data: {
           status: "SENT",
           dmSentAt: new Date(),
+          followPromptSentAt: sendFollowPrompt ? new Date() : null,
           errorMessage: null,
         },
       });
@@ -994,9 +1043,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     if (follows === false) {
       if (fallback) return;
       const promptText = renderMessageWithoutLink({
-        message:
-          automation.followPromptMessage ||
-          "quick favor before i send your link. i don't make any money from this, it's free. if you want to support me, just don't unfollow after, and star the repo on github if it helps you. tap the button once you're following and i'll send it over",
+        message: pickFollowPrompt(automation),
         commenterName,
       });
       try {
@@ -1308,6 +1355,9 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         status: "SENT",
         commentId: { not: dedupeId },
         createdAt: { gte: new Date(Date.now() - DM_REPEAT_COOLDOWN_MS) },
+        // Being asked to follow is not the answer: after following, the same
+        // keyword must work straight away.
+        followPromptSentAt: null,
       },
       select: { id: true },
     });
@@ -1397,6 +1447,29 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           ? follows === false
           : follows !== true;
     }
+    // Already asked to follow in the last 24 hours (any campaign): say nothing
+    // more. The next keyword DM is checked again and answered once they follow.
+    if (
+      sendFollowPrompt &&
+      (await followPromptedRecently(automation.instagramAccountId, senderId))
+    ) {
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: { automationId: automation.id, commentId: dedupeId },
+        },
+        create: {
+          ...logBase,
+          commenterName,
+          status: "SKIPPED_DEDUP",
+          errorMessage: "This person was already asked to follow in the last 24 hours",
+        },
+        update: {
+          status: "SKIPPED_DEDUP",
+          errorMessage: "This person was already asked to follow in the last 24 hours",
+        },
+      });
+      continue;
+    }
 
     const usage = await reserveWorkspaceDMSend(automation.workspaceId);
     if (!usage.allowed) {
@@ -1424,8 +1497,10 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       if (sendFollowPrompt) {
         const promptText = renderMessageWithoutLink({
           message:
-            automation.followPromptMessage ||
-            "Almost there! Follow me and tap the button below to grab your link 💛",
+            (automation.followPromptMessages ?? []).some((m) => m.trim())
+              ? pickFollowPrompt(automation)
+              : automation.followPromptMessage ||
+                "Almost there! Follow me and tap the button below to grab your link 💛",
           commenterName,
         });
         await sendDirectMessageWithButton({
@@ -1478,10 +1553,12 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           commenterName,
           status: "SENT",
           dmSentAt: new Date(),
+          followPromptSentAt: sendFollowPrompt ? new Date() : null,
         },
         update: {
           status: "SENT",
           dmSentAt: new Date(),
+          followPromptSentAt: sendFollowPrompt ? new Date() : null,
           errorMessage: null,
         },
       });

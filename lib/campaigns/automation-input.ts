@@ -25,6 +25,8 @@ export const createAutomationSchema = z
     requireFollow: z.boolean().optional().default(false),
     followPromptMessage: z.string().max(1000).optional().nullable(),
     followPromptButtonLabel: z.string().max(20).optional().nullable(),
+    // Rotating variants; button-template text is capped at 640 chars by Meta.
+    followPromptMessages: z.array(z.string().max(640)).max(10).optional().default([]),
     followUpEnabled: z.boolean().optional().default(false),
     followUpMessage: z.string().max(1000).optional().nullable(),
     // Minutes to wait before the follow-up. Capped at 24h so it stays inside
@@ -119,6 +121,9 @@ export function buildAutomationCreateFields(data: CreateAutomationInput) {
     followPromptButtonLabel: data.requireFollow
       ? data.followPromptButtonLabel || null
       : null,
+    followPromptMessages: data.requireFollow
+      ? data.followPromptMessages.map((m) => m.trim()).filter(Boolean)
+      : [],
     followUpEnabled: data.followUpEnabled,
     followUpMessage: data.followUpEnabled
       ? data.followUpMessage || null

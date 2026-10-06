@@ -230,8 +230,10 @@ beforeEach(() => {
   // latter should resolve by default, or every comment would look like a
   // duplicate of an already-answered one.
   mockPrisma.dmLog.findFirst.mockImplementation(
-    async (args: { where?: { status?: string } } = {}) =>
-      args.where?.status === "SENT" ? null : { commenterName: "commenter_user" }
+    async (args: { where?: { status?: string; followPromptSentAt?: unknown } } = {}) =>
+      args.where?.status === "SENT" || args.where?.followPromptSentAt
+        ? null // no earlier answer, no recent follow prompt
+        : { commenterName: "commenter_user" }
   );
   mockPrisma.dmLog.upsert.mockResolvedValue({});
   mockPrisma.dmLog.update.mockResolvedValue({});
@@ -1649,5 +1651,86 @@ describe("DM Worker — ignored single comment", () => {
     await processor(createMockJob({ ...mockJobData, commentId: "comment_777" }));
     expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
     delete process.env.OPENREPLY_IGNORE_COMMENT_IDS;
+  });
+});
+
+describe("DM Worker — follow first", () => {
+  const gated = {
+    ...mockAutomation,
+    requireFollow: true,
+    followPromptMessage: null,
+    followPromptButtonLabel: "我已 Follow ✅",
+    followPromptMessages: ["先 Follow @skillaihk 🙌", "Follow 咗就撳下面 👇"],
+  };
+
+  beforeEach(() => {
+    mockPrisma.automation.findMany.mockResolvedValue([gated]);
+  });
+
+  it("asks a non-follower to follow with one of the rotating prompts, and marks it as a prompt", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(false);
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    const call = mockSendPrivateReplyWithButton.mock.calls[0];
+    expect(gated.followPromptMessages).toContain(call[3]);
+    expect(call[4]).toBe("我已 Follow ✅");
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "SENT", followPromptSentAt: expect.any(Date) }),
+      })
+    );
+  });
+
+  it("sends the content straight away to a confirmed follower", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(true);
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ask the same person to follow twice within 24 hours", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(false);
+    mockPrisma.dmLog.findFirst.mockImplementation(
+      async (args: { where?: { followPromptSentAt?: unknown } } = {}) =>
+        args.where?.followPromptSentAt ? { id: "log_prompt_earlier" } : null
+    );
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SKIPPED_DEDUP",
+          errorMessage: expect.stringContaining("asked to follow"),
+        }),
+      })
+    );
+  });
+
+  it("answers a keyword DM once the person follows, even right after a prompt", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(true);
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...gated, dmTriggerEnabled: true }]);
+    // The only recent SENT log is the follow prompt: excluded from the 1-hour repeat check.
+    mockPrisma.dmLog.findFirst.mockImplementation(
+      async (args: { where?: { status?: string; followPromptSentAt?: unknown } } = {}) =>
+        args.where?.status === "SENT" && args.where.followPromptSentAt !== null ? { id: "prompt" } : null
+    );
+    const processor = getProcessor();
+    await processor({
+      name: "process-message",
+      data: { instagramAccountId: "ig_456", messageId: "mid_after_follow", messageText: "LINK", senderId: "commenter_999" },
+      id: "message_job_after_follow",
+      attemptsMade: 0,
+    });
+
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
   });
 });
