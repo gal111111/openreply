@@ -24,7 +24,7 @@ const instagramTokenSchema = z.object({
   access_token: z.string().trim().min(1),
   user_id: z.union([
     z.string().regex(/^[1-9]\d*$/),
-    z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    z.number().positive().refine(Number.isInteger),
   ]),
 });
 
