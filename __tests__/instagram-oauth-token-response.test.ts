@@ -21,6 +21,7 @@ describe("Instagram OAuth token responses", () => {
     ["flat", token, token.user_id],
     ["wrapped", { data: [token] }, token.user_id],
     ["numeric user ID", { ...token, user_id: 12345 }, "12345"],
+    ["large numeric user ID", { ...token, user_id: 17841400000000000 }, "17841400000000000"],
   ])("accepts a valid %s response", async (_name, response, expectedUserId) => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(response)));
 
@@ -46,7 +47,7 @@ describe("Instagram OAuth token responses", () => {
     ["missing fields", {}],
     ["empty token", { ...token, access_token: " " }],
     ["missing user ID", { access_token: "short-token" }],
-    ["unsafe numeric user ID", { ...token, user_id: Number.MAX_SAFE_INTEGER + 1 }],
+    ["fractional user ID", { ...token, user_id: 12.5 }],
     ["empty data", { data: [] }],
     ["multiple accounts", { data: [token, token] }],
     ["mixed flat and wrapped accounts", { ...token, data: [token] }],
