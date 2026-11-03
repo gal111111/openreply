@@ -6,6 +6,7 @@ import {
   timingSafeEqual,
 } from "crypto";
 import { getEncryptionKeyHex, requireEnv } from "@/lib/env";
+import { z } from "zod";
 
 // Instagram API with Instagram Login authorizes on www.instagram.com. The old
 // api.instagram.com/oauth/authorize host belonged to the retired Basic Display
@@ -18,6 +19,28 @@ const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 16;
 const AUTH_TAG_LENGTH = 16;
 const STATE_MAX_AGE_MS = 10 * 60 * 1000;
+
+const instagramTokenSchema = z.object({
+  access_token: z.string().trim().min(1),
+  user_id: z.union([
+    z.string().regex(/^[1-9]\d*$/),
+    z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  ]),
+});
+
+// Instagram returns either a flat token object or one account inside data.
+// Reject mixed or multi-account responses so credentials cannot be selected
+// from an ambiguous response.
+const instagramTokenResponseSchema = z.union([
+  instagramTokenSchema.extend({ data: z.undefined().optional() }),
+  z
+    .object({
+      data: z.tuple([instagramTokenSchema]),
+      access_token: z.undefined().optional(),
+      user_id: z.undefined().optional(),
+    })
+    .transform(({ data }) => data[0]),
+]);
 
 interface OAuthStatePayload {
   workspaceId: string;
@@ -112,10 +135,16 @@ export async function exchangeCodeForToken(
     );
   }
 
-  const data = await response.json();
+  const parsed = instagramTokenResponseSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new Error(
+      "Instagram returned an invalid token response. Expected exactly one account with an access token and user ID."
+    );
+  }
+
   return {
-    accessToken: data.access_token,
-    userId: String(data.user_id),
+    accessToken: parsed.data.access_token,
+    userId: String(parsed.data.user_id),
   };
 }
 
