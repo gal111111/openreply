@@ -37,6 +37,7 @@ interface LoadedCampaign {
   matchAnyPost: boolean;
   keywords: string[];
   matchAnyWord: boolean;
+  wholeWordMatch: boolean;
   dmTriggerEnabled: boolean;
   dmMessage: string;
   openingDmEnabled: boolean;
@@ -159,6 +160,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
 
   const [matchMode, setMatchMode] = useState<MatchMode>("specific");
   const [keywordText, setKeywordText] = useState("");
+  const [wholeWordMatch, setWholeWordMatch] = useState(true);
   const [dmTriggerEnabled, setDmTriggerEnabled] = useState(false);
 
   const [publicReplyEnabled, setPublicReplyEnabled] = useState(false);
@@ -260,6 +262,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
         setPostUrl(c.postUrl);
         setMatchMode(c.matchAnyWord ? "any" : "specific");
         setKeywordText(c.keywords.join(", "));
+        setWholeWordMatch(c.wholeWordMatch ?? true);
         setDmTriggerEnabled(c.dmTriggerEnabled ?? false);
         setPublicReplyEnabled(c.publicReplyEnabled);
         setPublicReplyMessages(
@@ -408,6 +411,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
       pendingNextReel: triggerScope === "next",
       matchAnyWord: matchMode === "any",
       keywords: matchMode === "any" ? [] : keywords,
+      wholeWordMatch,
       dmTriggerEnabled,
       dmMessage,
       openingDmEnabled,
@@ -715,6 +719,18 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
                 className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-zinc-500 focus:border-accent/40 focus:outline-none"
               />
               <p className="text-xs text-muted">{t("Use commas to separate words")}</p>
+              <label className="flex items-center gap-2 text-sm text-foreground">
+                <input
+                  type="checkbox"
+                  checked={wholeWordMatch}
+                  onChange={(e) => setWholeWordMatch(e.target.checked)}
+                  className="h-4 w-4 accent-accent"
+                />
+                {t("Match whole words only")}
+              </label>
+              <p className="text-xs text-muted">
+                {t("Turn off to match within words or unspaced text, such as Chinese sentences.")}
+              </p>
             </div>
           )}
           <Radio
