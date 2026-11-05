@@ -17,14 +17,14 @@ const id = z.string().regex(/^\d+$/);
 const accountSchema = z.object({ id, username: z.string().min(1) });
 
 export class SerriniConnectionError extends Error {
-  constructor(readonly step: string, readonly graphCode: number) {
+  constructor(readonly step: string, readonly graphCode: number, readonly reason = "unspecified") {
     super(`Serrini ${step} failed (${graphCode})`);
   }
 }
 
 export function serriniFailureDiagnostic(error: unknown): string {
   if (error instanceof SerriniConnectionError)
-    return `${error.step}:graph_${error.graphCode}`;
+    return `${error.step}:graph_${error.graphCode}:${error.reason}`;
   if (error instanceof z.ZodError)
     return `response_shape:${error.issues.map((issue) => issue.path.join(".")).join(",")}`;
   // Never persist upstream messages or request URLs, which may contain tokens.
@@ -63,20 +63,25 @@ export function getSerriniAuthorizationUrl(
   return url.toString();
 }
 
-export async function exchangeSerriniCode(code: string) {
+export async function exchangeSerriniCode(code: string, redirectUri: string) {
   const url = new URL(`${GRAPH}/oauth/access_token`);
   url.search = new URLSearchParams({
     client_id: requireEnv("SERRINI_META_APP_ID"),
     client_secret: requireEnv("SERRINI_META_APP_SECRET"),
     code,
+    redirect_uri: redirectUri,
   }).toString();
   const response = await fetch(url, {
     signal: AbortSignal.timeout(15000),
     cache: "no-store",
   });
   const data = await response.json();
-  if (!response.ok || data.error)
-    throw new SerriniConnectionError("token_exchange", Number(data.error?.code) || response.status);
+  if (!response.ok || data.error) {
+    const message = String(data.error?.message || "").toLowerCase();
+    const reason = ["redirect_uri", "client_secret", "client_id", "verification code", "expired", "already used", "not allowed", "not published", "invalid code", "appsecret_proof"]
+      .find((term) => message.includes(term)) || "unspecified";
+    throw new SerriniConnectionError("token_exchange", Number(data.error?.code) || response.status, reason.replaceAll(" ", "_"));
+  }
   return z
     .object({
       access_token: z.string().min(1),

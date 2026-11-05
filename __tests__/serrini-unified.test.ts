@@ -132,10 +132,10 @@ describe("Serrini OAuth provenance", () => {
   it("reports numeric token failures without persisting upstream credentials", async () => {
     respond({ error: { code: 100, message: "access_token=private-secret" } }, 400);
     try {
-      await exchangeSerriniCode("private-code");
+      await exchangeSerriniCode("private-code", "https://openreply.example/callback");
       throw new Error("Expected token exchange rejection");
     } catch (error) {
-      expect(serriniFailureDiagnostic(error)).toBe("token_exchange:graph_100");
+      expect(serriniFailureDiagnostic(error)).toBe("token_exchange:graph_100:unspecified");
       expect(serriniFailureDiagnostic(error)).not.toContain("private");
     }
   });
@@ -158,9 +158,10 @@ describe("Serrini OAuth provenance", () => {
   });
   it("accepts the documented token without guessing its lifetime", async () => {
     respond({ access_token: "system-token" });
-    expect(await exchangeSerriniCode("code")).toEqual({
+    expect(await exchangeSerriniCode("code", "https://openreply.example/callback")).toEqual({
       access_token: "system-token",
     });
+    expect(new URL(fetchMock.mock.calls[0][0]).searchParams.get("redirect_uri")).toBe("https://openreply.example/callback");
   });
   it("binds the account token to the verified business and app", async () => {
     validAssets();

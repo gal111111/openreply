@@ -60,7 +60,7 @@ export async function GET(request: NextRequest) {
   if (!code) return finish("invalid");
   let stage = "token_exchange";
   try {
-    const token = await exchangeSerriniCode(code);
+    const token = await exchangeSerriniCode(code, `${base}/api/instagram/serrini/callback`);
     stage = "asset_verification";
     const assets = await getSerriniAssets(token.access_token);
     stage = "profile_verification";
