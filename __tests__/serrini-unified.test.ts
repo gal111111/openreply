@@ -18,6 +18,7 @@ import {
   getSerriniAssets,
   SERRINI_SCOPES,
   exchangeSerriniCode,
+  serriniFailureDiagnostic,
 } from "@/lib/meta/serrini-unified";
 import { isStopRequest } from "@/lib/meta/serrini-suppression";
 import { POST } from "@/app/api/webhook/serrini/route";
@@ -128,6 +129,19 @@ describe("Serrini per-account Graph routing", () => {
 });
 
 describe("Serrini OAuth provenance", () => {
+  it("reports numeric token failures without persisting upstream credentials", async () => {
+    respond({ error: { code: 100, message: "access_token=private-secret" } }, 400);
+    try {
+      await exchangeSerriniCode("private-code");
+      throw new Error("Expected token exchange rejection");
+    } catch (error) {
+      expect(serriniFailureDiagnostic(error)).toBe("token_exchange:graph_100");
+      expect(serriniFailureDiagnostic(error)).not.toContain("private");
+    }
+  });
+  it("does not copy unexpected error text into operational records", () => {
+    expect(serriniFailureDiagnostic(new Error("secret-token"))).toBe("unexpected_failure");
+  });
   it("uses the dedicated parent app and configuration", () => {
     const url = new URL(
       getSerriniAuthorizationUrl(

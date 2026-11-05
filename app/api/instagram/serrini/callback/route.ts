@@ -16,6 +16,7 @@ import {
   SERRINI_HANDLES,
   SERRINI_STATE_COOKIE,
   SERRINI_STATE_PREFIX,
+  serriniFailureDiagnostic,
 } from "@/lib/meta/serrini-unified";
 
 export async function GET(request: NextRequest) {
@@ -57,9 +58,12 @@ export async function GET(request: NextRequest) {
   if (request.nextUrl.searchParams.has("error")) return finish("denied");
   const code = request.nextUrl.searchParams.get("code");
   if (!code) return finish("invalid");
+  let stage = "token_exchange";
   try {
     const token = await exchangeSerriniCode(code);
+    stage = "asset_verification";
     const assets = await getSerriniAssets(token.access_token);
+    stage = "profile_verification";
     const profiles = await Promise.all(
       assets.accounts.map(async (account) => {
         const profile = await getUserInfo(
@@ -78,6 +82,7 @@ export async function GET(request: NextRequest) {
       }),
     );
     const encryptedToken = encryptToken(token.access_token);
+    stage = "account_persistence";
     // All selected accounts commit together. A conflicting existing owner aborts
     // the transaction before either account receives a new credential.
     await prisma.$transaction(async (tx) => {
@@ -146,7 +151,7 @@ export async function GET(request: NextRequest) {
       }
     }
     return finish("connected");
-  } catch {
+  } catch (error) {
     await prisma.operationalEvent
       .create({
         data: {
@@ -154,7 +159,7 @@ export async function GET(request: NextRequest) {
           source: "SYSTEM",
           level: "ERROR",
           message:
-            "Serrini Unified Login connection failed. Reconnect after checking asset and scope access.",
+            `Serrini Unified Login connection failed [${stage};${serriniFailureDiagnostic(error)}].`,
         },
       })
       .catch(() => {});

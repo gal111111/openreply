@@ -16,7 +16,22 @@ const GRAPH = "https://graph.facebook.com/v27.0";
 const id = z.string().regex(/^\d+$/);
 const accountSchema = z.object({ id, username: z.string().min(1) });
 
-async function graphJson(path: string, token: string) {
+export class SerriniConnectionError extends Error {
+  constructor(readonly step: string, readonly graphCode: number) {
+    super(`Serrini ${step} failed (${graphCode})`);
+  }
+}
+
+export function serriniFailureDiagnostic(error: unknown): string {
+  if (error instanceof SerriniConnectionError)
+    return `${error.step}:graph_${error.graphCode}`;
+  if (error instanceof z.ZodError)
+    return `response_shape:${error.issues.map((issue) => issue.path.join(".")).join(",")}`;
+  // Never persist upstream messages or request URLs, which may contain tokens.
+  return "unexpected_failure";
+}
+
+async function graphJson(path: string, token: string, step: string) {
   const response = await fetch(`${GRAPH}/${path}`, {
     headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(15000),
@@ -25,9 +40,7 @@ async function graphJson(path: string, token: string) {
   const data = await response.json();
   if (!response.ok || data.error) {
     // Meta error text can contain request data. Persist only its numeric code.
-    throw new Error(
-      `Unified Graph request failed (${Number(data.error?.code) || response.status})`,
-    );
+    throw new SerriniConnectionError(step, Number(data.error?.code) || response.status);
   }
   return data;
 }
@@ -63,7 +76,7 @@ export async function exchangeSerriniCode(code: string) {
   });
   const data = await response.json();
   if (!response.ok || data.error)
-    throw new Error("Unified token exchange failed");
+    throw new SerriniConnectionError("token_exchange", Number(data.error?.code) || response.status);
   return z
     .object({
       access_token: z.string().min(1),
@@ -74,10 +87,11 @@ export async function exchangeSerriniCode(code: string) {
 
 export async function getSerriniAssets(accessToken: string) {
   const [business, debug] = await Promise.all([
-    graphJson("me?fields=client_business_id", accessToken),
+    graphJson("me?fields=client_business_id", accessToken, "business_read"),
     graphJson(
       `debug_token?input_token=${encodeURIComponent(accessToken)}`,
       `${requireEnv("SERRINI_META_APP_ID")}|${requireEnv("SERRINI_META_APP_SECRET")}`,
+      "token_debug",
     ),
   ]);
   const businessId = id.parse(business.client_business_id);
@@ -105,7 +119,7 @@ export async function getSerriniAssets(accessToken: string) {
     "me/assigned_instagram_accounts?fields=id,username&limit=100";
   const cursors = new Set<string>();
   while (path) {
-    const page = await graphJson(path, accessToken);
+    const page = await graphJson(path, accessToken, "assigned_accounts");
     accounts.push(...z.array(accountSchema).parse(page.data));
     const after = page.paging?.cursors?.after;
     if (!page.paging?.next || typeof after !== "string" || cursors.has(after))
