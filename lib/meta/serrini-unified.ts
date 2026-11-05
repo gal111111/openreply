@@ -17,8 +17,8 @@ const id = z.string().regex(/^\d+$/);
 const accountSchema = z.object({ id, username: z.string().min(1) });
 
 export class SerriniConnectionError extends Error {
-  constructor(readonly step: string, readonly graphCode: number, readonly reason = "unspecified") {
-    super(`Serrini ${step} failed (${graphCode})`);
+  constructor(readonly step: string, readonly graphCode: number, readonly reason = "unspecified", message?: string) {
+    super(message || `Serrini ${step} failed (${graphCode})`);
   }
 }
 
@@ -27,6 +27,17 @@ export function serriniFailureDiagnostic(error: unknown): string {
     return `${error.step}:graph_${error.graphCode}:${error.reason}`;
   if (error instanceof z.ZodError)
     return `response_shape:${error.issues.map((issue) => issue.path.join(".")).join(",")}`;
+  if (error instanceof Error) {
+    const knownGuards: Record<string, string> = {
+      "The selected business is outside Serrini": "business_mismatch",
+      "Serrini app permissions are incomplete": "app_or_scope_mismatch",
+      "No approved Serrini Instagram account was selected": "approved_accounts_missing",
+      "Serrini token has expired": "token_expired",
+      "Serrini token exceeds the approved 60-day lifetime": "token_lifetime_exceeds_60_days",
+      "Assigned Instagram account listing exceeded its limit": "pagination_limit",
+    };
+    if (knownGuards[error.message]) return knownGuards[error.message];
+  }
   // Never persist upstream messages or request URLs, which may contain tokens.
   return "unexpected_failure";
 }
@@ -101,7 +112,7 @@ export async function getSerriniAssets(accessToken: string) {
   ]);
   const businessId = id.parse(business.client_business_id);
   if (businessId !== requireEnv("SERRINI_META_BUSINESS_ID")) {
-    throw new Error("The selected business is outside Serrini");
+    throw new SerriniConnectionError("business_check", 0, `received_${businessId}`, "The selected business is outside Serrini");
   }
   const token = z
     .object({
@@ -113,11 +124,12 @@ export async function getSerriniAssets(accessToken: string) {
       }),
     })
     .parse(debug).data;
-  if (
-    token.app_id !== requireEnv("SERRINI_META_APP_ID") ||
-    !SERRINI_SCOPES.every((scope) => token.scopes.includes(scope))
-  ) {
-    throw new Error("Serrini app permissions are incomplete");
+  if (token.app_id !== requireEnv("SERRINI_META_APP_ID")) {
+    throw new SerriniConnectionError("app_check", 0, `received_${token.app_id}`, "Serrini app permissions are incomplete");
+  }
+  const missingScopes = SERRINI_SCOPES.filter((scope) => !token.scopes.includes(scope));
+  if (missingScopes.length) {
+    throw new SerriniConnectionError("scope_check", 0, `missing_${missingScopes.join("+")}`, "Serrini app permissions are incomplete");
   }
   const accounts: z.infer<typeof accountSchema>[] = [];
   let path: string | null =
@@ -138,7 +150,7 @@ export async function getSerriniAssets(accessToken: string) {
     SERRINI_HANDLES.has(account.username.toLowerCase()),
   );
   if (!selected.length)
-    throw new Error("No approved Serrini Instagram account was selected");
+    throw new SerriniConnectionError("account_check", 0, `assigned_count_${accounts.length}`, "No approved Serrini Instagram account was selected");
   if (token.expires_at * 1000 <= Date.now())
     throw new Error("Serrini token has expired");
   // The approved connection is time-limited even if Meta's preview labels it

@@ -142,6 +142,9 @@ describe("Serrini OAuth provenance", () => {
   it("does not copy unexpected error text into operational records", () => {
     expect(serriniFailureDiagnostic(new Error("secret-token"))).toBe("unexpected_failure");
   });
+  it("identifies a rejected business without logging arbitrary request values", () => {
+    expect(serriniFailureDiagnostic(new Error("The selected business is outside Serrini"))).toBe("business_mismatch");
+  });
   it("uses the dedicated parent app and configuration", () => {
     const url = new URL(
       getSerriniAuthorizationUrl(
