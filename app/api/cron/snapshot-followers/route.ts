@@ -38,6 +38,8 @@ export async function GET(request: NextRequest) {
       username: true,
       instagramId: true,
       accessToken: true,
+      metaLoginMode: true,
+      metaAppId: true,
       provider: true,
       zernioAccountId: true,
     },

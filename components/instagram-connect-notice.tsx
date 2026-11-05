@@ -42,6 +42,17 @@ const MESSAGES: Record<string, { tone: Tone; title: StaticMessageKey; detail: St
 export function InstagramConnectNotice() {
   const { t } = useI18n();
   const searchParams = useSearchParams();
+  const serriniStatus = searchParams.get("serrini");
+  if (serriniStatus) {
+    return (
+      <Notice tone={serriniStatus === "connected" ? "success" : "warning"}
+        title={serriniStatus === "connected" ? "Serrini Instagram 已連接" : "Serrini Instagram 連接待完成"}>
+        <p>{serriniStatus === "connected"
+          ? "請在帳號清單核對 @serrinion／@serrini666，再設定活動。Webhook 狀態及實際回覆需另外核實。"
+          : "請重新開始連接並核對 Serrini 商家、帳號及五項權限。"}</p>
+      </Notice>
+    );
+  }
   const status = searchParams.get("instagram");
 
   if (!status) return null;

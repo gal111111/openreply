@@ -112,6 +112,8 @@ export async function reconcileComments(): Promise<void> {
           instagramId: true,
           username: true,
           accessToken: true,
+          metaLoginMode: true,
+          metaAppId: true,
           provider: true,
           workspaceId: true,
           zernioAccountId: true,

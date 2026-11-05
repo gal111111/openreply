@@ -1,5 +1,6 @@
 export {
   MetaApiError,
+  MetaDeliveryUnconfirmedError,
   RateLimitError,
   TokenExpiredError,
   PermissionError,

@@ -235,6 +235,26 @@ describe.skipIf(!DATABASE_URL)("tracked link order on a real Postgres", () => {
     }
   });
 
+  it("keeps existing Instagram accounts on their original login mode", async () => {
+    const account = await state.db.instagramAccount.findUniqueOrThrow({ where: { id: accountId } });
+    expect(account.metaLoginMode).toBe("INSTAGRAM");
+    expect(account.metaAppId).toBeNull();
+  });
+
+  it("persists a single stop record per account and sender", async () => {
+    const key = { instagramAccountId: accountId, senderId: "stop_sender" };
+    await state.db.instagramReplySuppression.upsert({
+      where: { instagramAccountId_senderId: key },
+      create: { ...key, inboundId: "stop_1" }, update: {},
+    });
+    await state.db.instagramReplySuppression.upsert({
+      where: { instagramAccountId_senderId: key },
+      create: { ...key, inboundId: "stop_2" }, update: { inboundId: "stop_2" },
+    });
+    expect(await state.db.instagramReplySuppression.count({ where: key })).toBe(1);
+    expect((await state.db.instagramReplySuppression.findUniqueOrThrow({ where: { instagramAccountId_senderId: key } })).inboundId).toBe("stop_2");
+  });
+
   describe("the migration", () => {
     it("numbers existing links in the order they were created, ids breaking ties", async () => {
       const { rows } = await sql.query<{ id: string; position: number }>(

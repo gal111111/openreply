@@ -24,7 +24,9 @@ const {
       findMany: vi.fn(),
       findFirst: vi.fn(),
     },
+    instagramReplySuppression: { findUnique: vi.fn(), upsert: vi.fn() },
     dmLog: {
+      updateMany: vi.fn(),
       findUnique: vi.fn(),
       findFirst: vi.fn(),
       upsert: vi.fn(),
@@ -79,6 +81,9 @@ vi.mock("@/lib/meta/client", () => ({
       this.code = code;
       this.name = "MetaApiError";
     }
+  },
+  MetaDeliveryUnconfirmedError: class MetaDeliveryUnconfirmedError extends Error {
+    name = "MetaDeliveryUnconfirmedError";
   },
   TokenExpiredError: class TokenExpiredError extends Error {
     name = "TokenExpiredError";
@@ -1732,5 +1737,49 @@ describe("DM Worker — follow first", () => {
 
     expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
     expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("Serrini Unified send reservations", () => {
+  function useUnifiedAccount() {
+    vi.stubEnv("SERRINI_META_APP_ID", "serrini-app");
+    mockPrisma.automation.findMany.mockResolvedValue([{
+      ...mockAutomation,
+      instagramAccount: {
+        ...mockAutomation.instagramAccount,
+        metaLoginMode: "UNIFIED", metaAppId: "serrini-app",
+      },
+    }]);
+  }
+
+  it("persists an unknown send marker before calling Instagram", async () => {
+    useUnifiedAccount();
+    mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 1 });
+    await getProcessor()(createMockJob());
+    const claim = mockPrisma.dmLog.updateMany.mock.calls.find(([args]) => args.data.dmDeliveryUnconfirmed === true);
+    expect(claim?.[0].where.dmDeliveryUnconfirmed).toBe(false);
+    expect(mockPrisma.dmLog.updateMany.mock.invocationCallOrder[0]).toBeLessThan(mockSendPrivateReply.mock.invocationCallOrder[0]);
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({status:"SENT",dmDeliveryUnconfirmed:false}),
+    }));
+  });
+
+  it("does not send when another process already reserved the inbound", async () => {
+    useUnifiedAccount();
+    mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 0 });
+    await getProcessor()(createMockJob());
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+    expect(mockReleaseWorkspaceDMReservation).toHaveBeenCalled();
+  });
+
+  it("persists an immediate stop request before any resource matching", async () => {
+    mockPrisma.instagramAccount.findUnique.mockResolvedValue({id:"serrini",metaLoginMode:"UNIFIED"});
+    await getProcessor()({ ...createMockJob(), name:"process-message", data:{instagramAccountId:"ig",senderId:"sender",messageId:"inbound",messageText:"不要再發 ECC"} });
+    expect(mockPrisma.instagramReplySuppression.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create:{instagramAccountId:"serrini",senderId:"sender",inboundId:"inbound"},
+    }));
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
   });
 });

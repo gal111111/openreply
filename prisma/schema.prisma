@@ -137,6 +137,10 @@ model InstagramAccount {
   name              String?
   provider          InstagramProvider @default(META)
   zernioAccountId   String?
+  metaLoginMode     String @default("INSTAGRAM")
+  metaAppId         String?
+  metaBusinessId    String?
+  metaConfigId      String?
   accessToken       String
   tokenExpiresAt    DateTime?
   webhookSubscribed Boolean  @default(false)
@@ -148,8 +152,21 @@ model InstagramAccount {
   dmLogs      DmLog[]
   linkClicks  LinkClick[]
   followerSnapshots FollowerSnapshot[]
+  replySuppressions InstagramReplySuppression[]
 
   @@index([workspaceId])
+}
+
+model InstagramReplySuppression {
+  id String @id @default(cuid())
+  instagramAccountId String
+  senderId String
+  inboundId String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([instagramAccountId, senderId])
 }
 
 /// Daily follower total for one account. Instagram only retains ~30 days of

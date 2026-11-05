@@ -33,6 +33,7 @@ export async function GET(request: NextRequest) {
     where: {
       accessToken: { not: "" },
       provider: "META",
+      metaLoginMode: "INSTAGRAM",
       tokenExpiresAt: {
         not: null,
         lte: cutoffDate,

@@ -1,3 +1,4 @@
+import { isStopRequest, suppressSerriniSender } from "@/lib/meta/serrini-suppression";
 import { prisma } from '@/lib/db/client';
 import { getDMQueue, MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from '@/lib/queue/client';
 import { parseCommentEvents, parseMessageEvents, parsePostbackEvents, parseReadEvents } from '@/lib/meta/webhook';
@@ -6,15 +7,27 @@ import { Prisma, type InstagramProvider } from '@/app/generated/prisma/client';
 const OPENING_DM_READ_FALLBACK_DELAY_MS = 5 * 60 * 1000;
 type InstagramPayload = Parameters<typeof parseCommentEvents>[0];
 
-export async function processInstagramWebhook({ payload: incoming, provider, workspaceId }: {
-  payload: InstagramPayload; provider: InstagramProvider; workspaceId?: string;
+export async function processInstagramWebhook({ payload: incoming, provider, workspaceId, metaAppId, excludeUnified = false }: {
+  payload: InstagramPayload; provider: InstagramProvider; workspaceId?: string; metaAppId?: string; excludeUnified?: boolean;
 }) {
   if (incoming.object !== 'instagram' || !Array.isArray(incoming.entry)) return;
   const accounts = await prisma.instagramAccount.findMany({
-    where: { instagramId: { in: incoming.entry.map(e => e.id) }, provider, ...(workspaceId ? { workspaceId } : {}) },
+    where: { instagramId: { in: incoming.entry.map(e => e.id) }, provider, ...(metaAppId ? { metaAppId, metaLoginMode: "UNIFIED" } : {}), ...(excludeUnified ? { metaLoginMode: "INSTAGRAM" } : {}), ...(workspaceId ? { workspaceId } : {}) },
     select: { id: true, instagramId: true, workspaceId: true },
   });
   const accountMap = new Map(accounts.map(a => [a.instagramId, a]));
+  if (metaAppId) {
+    for (const entry of incoming.entry) {
+      const account = accountMap.get(entry.id);
+      if (!account) continue;
+      for (const event of entry.messaging ?? []) {
+        if (!event.message?.is_echo && event.sender?.id && event.message?.mid &&
+            isStopRequest(event.message.text ?? "")) {
+          await suppressSerriniSender(account.id, event.sender.id, event.message.mid);
+        }
+      }
+    }
+  }
   const allowed = new Set(accountMap.keys());
   const payload = { ...incoming, entry: incoming.entry.filter(e => allowed.has(e.id)) };
   if (!payload.entry.length) return;

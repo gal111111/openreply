@@ -1,8 +1,9 @@
 import { decryptToken } from "@/lib/meta/oauth";
+import type { MetaCredential } from "@/lib/meta/credentials";
 import { prisma } from "@/lib/db/client";
 
 export type InstagramContext =
-  | { provider: "META"; accessToken: string }
+  | { provider: "META"; accessToken: MetaCredential }
   | {
       provider: "ZERNIO";
       apiKey: string;
@@ -17,6 +18,8 @@ export type ProviderAccount = {
   zernioAccountId: string | null;
   instagramId: string;
   accessToken: string;
+  metaLoginMode?: string;
+  metaAppId?: string | null;
 };
 
 export function hasInstagramCredentials(
@@ -31,8 +34,18 @@ export async function createInstagramContext(
   account: ProviderAccount,
   operationId?: string
 ): Promise<InstagramContext> {
-  if (account.provider !== "ZERNIO")
-    return { provider: "META", accessToken: decryptToken(account.accessToken) };
+  if (account.provider !== "ZERNIO") {
+    const token = decryptToken(account.accessToken);
+    if (account.metaLoginMode === "UNIFIED") {
+      if (account.metaAppId !== process.env.SERRINI_META_APP_ID) {
+        throw new Error("Unified Instagram app binding is unavailable");
+      }
+      return { provider: "META", accessToken: {
+        accessToken: token, instagramId: account.instagramId, loginMode: "UNIFIED",
+      } };
+    }
+    return { provider: "META", accessToken: token };
+  }
   if (!account.zernioAccountId)
     throw new Error("Zernio account is not connected");
   const connection = await prisma.zernioConnection.findUnique({

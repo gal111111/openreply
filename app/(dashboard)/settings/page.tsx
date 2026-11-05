@@ -220,13 +220,19 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        <div className="mt-6 pt-4 border-t border-border flex gap-3">
+        <div className="mt-6 pt-4 border-t border-border flex flex-wrap gap-3">
           <a
             href="/api/instagram/connect"
             className="px-4 py-2 rounded text-sm font-medium transition-colors bg-accent text-white hover:bg-accent-hover"
           >
             {t("Connect using your own Meta app")}
           </a>
+          {canManageMembers && (
+            <a href="/api/instagram/serrini/connect"
+              className="px-4 py-2 rounded border border-border text-sm font-medium hover:bg-surface">
+              連接 Serrini Instagram
+            </a>
+          )}
         </div>
       </section>
 

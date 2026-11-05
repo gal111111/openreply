@@ -1,8 +1,12 @@
 import { getMetaGraphApiVersion, requireEnv } from "@/lib/env";
 
-function instagramGraphBase() {
-  return `https://graph.instagram.com/${getMetaGraphApiVersion()}`;
-}
+import {
+  type MetaCredential,
+  tokenValue,
+  instagramGraphBase,
+  instagramUserPath,
+  graphNextPage,
+} from "./credentials";
 
 function facebookGraphBase() {
   return `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
@@ -151,19 +155,64 @@ async function handleResponse<T>(response: Response): Promise<T> {
   return data as T;
 }
 
+export class MetaDeliveryUnconfirmedError extends Error {
+  constructor() {
+    super("Instagram send result is unknown. Reconcile before retrying.");
+    this.name = "MetaDeliveryUnconfirmedError";
+  }
+}
+
+async function sendFetch(
+  credential: MetaCredential,
+  url: string,
+  options: RequestInit
+): Promise<Response> {
+  try {
+    return await fetch(url, typeof credential === "string"
+      ? options
+      : { ...options, signal: AbortSignal.timeout(15000) });
+  } catch (error) {
+    if (typeof credential !== "string") throw new MetaDeliveryUnconfirmedError();
+    throw error;
+  }
+}
+
+async function handleSendResponse<T>(
+  response: Response,
+  credential: MetaCredential
+): Promise<T> {
+  try {
+    if (typeof credential !== "string" && response.status >= 500) {
+      throw new MetaDeliveryUnconfirmedError();
+    }
+    const data = await handleResponse<T>(response);
+    const receipt = data as { id?: string; message_id?: string };
+    if (typeof credential !== "string" && !receipt.id && !receipt.message_id) {
+      throw new MetaDeliveryUnconfirmedError();
+    }
+    return data;
+  } catch (error) {
+    if (typeof credential !== "string" && !(error instanceof MetaApiError)) {
+      throw new MetaDeliveryUnconfirmedError();
+    }
+    throw error;
+  }
+}
+
 export async function sendPrivateReply(
-  accessToken: string,
+  accessToken: MetaCredential,
   instagramAccountId: string,
   commentId: string,
   message: string
 ): Promise<{ recipient_id: string; message_id: string }> {
-  const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+  const response = await sendFetch(
+    accessToken,
+    `${instagramGraphBase(accessToken)}/${instagramAccountId}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenValue(accessToken)}`,
       },
       body: JSON.stringify({
         recipient: { comment_id: commentId },
@@ -172,7 +221,7 @@ export async function sendPrivateReply(
     }
   );
 
-  return handleResponse(response);
+  return handleSendResponse(response, accessToken);
 }
 
 /**
@@ -182,20 +231,21 @@ export async function sendPrivateReply(
  * the follow-up ("reveal") message.
  */
 export async function sendPrivateReplyWithButton(
-  accessToken: string,
+  accessToken: MetaCredential,
   instagramAccountId: string,
   commentId: string,
   text: string,
   buttonTitle: string,
   payload: string
 ): Promise<{ recipient_id: string; message_id: string }> {
-  const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+  const response = await sendFetch(
+    accessToken,
+    `${instagramGraphBase(accessToken)}/${instagramAccountId}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenValue(accessToken)}`,
       },
       body: JSON.stringify({
         recipient: { comment_id: commentId },
@@ -216,7 +266,7 @@ export async function sendPrivateReplyWithButton(
     }
   );
 
-  return handleResponse(response);
+  return handleSendResponse(response, accessToken);
 }
 
 /**
@@ -225,20 +275,21 @@ export async function sendPrivateReplyWithButton(
  * the button fires another `messaging_postbacks` webhook carrying `payload`.
  */
 export async function sendDirectMessageWithButton(
-  accessToken: string,
+  accessToken: MetaCredential,
   instagramAccountId: string,
   userId: string,
   text: string,
   buttonTitle: string,
   payload: string
 ): Promise<{ recipient_id: string; message_id: string }> {
-  const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+  const response = await sendFetch(
+    accessToken,
+    `${instagramGraphBase(accessToken)}/${instagramAccountId}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenValue(accessToken)}`,
       },
       body: JSON.stringify({
         recipient: { id: userId },
@@ -258,7 +309,7 @@ export async function sendDirectMessageWithButton(
     }
   );
 
-  return handleResponse(response);
+  return handleSendResponse(response, accessToken);
 }
 
 /**
@@ -269,16 +320,16 @@ export async function sendDirectMessageWithButton(
  * how to treat the unverifiable case.
  */
 export async function getUserFollowStatus(
-  accessToken: string,
+  accessToken: MetaCredential,
   recipientId: string
 ): Promise<boolean | null> {
-  const url = new URL(`${instagramGraphBase()}/${recipientId}`);
+  const url = new URL(`${instagramGraphBase(accessToken)}/${recipientId}`);
   url.searchParams.set("fields", "is_user_follow_business");
 
   try {
     const response = await fetch(url.toString(), {
       method: "GET",
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${tokenValue(accessToken)}` },
     });
     if (!response.ok) return null;
     const data = await response.json();
@@ -311,19 +362,20 @@ function toWebUrlButtons(buttons: LinkButton[]) {
  * no opening DM, where the reveal is delivered straight to the comment).
  */
 export async function sendPrivateReplyWithLinkButton(
-  accessToken: string,
+  accessToken: MetaCredential,
   instagramAccountId: string,
   commentId: string,
   text: string,
   buttons: LinkButton[]
 ): Promise<{ recipient_id: string; message_id: string }> {
-  const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+  const response = await sendFetch(
+    accessToken,
+    `${instagramGraphBase(accessToken)}/${instagramAccountId}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenValue(accessToken)}`,
       },
       body: JSON.stringify({
         recipient: { comment_id: commentId },
@@ -341,7 +393,7 @@ export async function sendPrivateReplyWithLinkButton(
     }
   );
 
-  return handleResponse(response);
+  return handleSendResponse(response, accessToken);
 }
 
 /**
@@ -349,18 +401,19 @@ export async function sendPrivateReplyWithLinkButton(
  * Used to deliver the reveal message after a button postback.
  */
 export async function sendDirectMessage(
-  accessToken: string,
+  accessToken: MetaCredential,
   instagramAccountId: string,
   userId: string,
   message: string
 ): Promise<{ recipient_id: string; message_id: string }> {
-  const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+  const response = await sendFetch(
+    accessToken,
+    `${instagramGraphBase(accessToken)}/${instagramAccountId}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenValue(accessToken)}`,
       },
       body: JSON.stringify({
         recipient: { id: userId },
@@ -369,7 +422,7 @@ export async function sendDirectMessage(
     }
   );
 
-  return handleResponse(response);
+  return handleSendResponse(response, accessToken);
 }
 
 /**
@@ -377,19 +430,20 @@ export async function sendDirectMessage(
  * the reveal message plus tappable link buttons (cleaner than inline URLs).
  */
 export async function sendDirectMessageWithLinkButton(
-  accessToken: string,
+  accessToken: MetaCredential,
   instagramAccountId: string,
   userId: string,
   text: string,
   buttons: LinkButton[]
 ): Promise<{ recipient_id: string; message_id: string }> {
-  const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+  const response = await sendFetch(
+    accessToken,
+    `${instagramGraphBase(accessToken)}/${instagramAccountId}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenValue(accessToken)}`,
       },
       body: JSON.stringify({
         recipient: { id: userId },
@@ -407,36 +461,37 @@ export async function sendDirectMessageWithLinkButton(
     }
   );
 
-  return handleResponse(response);
+  return handleSendResponse(response, accessToken);
 }
 
 export async function sendCommentReply(
-  accessToken: string,
+  accessToken: MetaCredential,
   commentId: string,
   message: string
 ): Promise<{ id: string }> {
-  const response = await fetch(
-    `${instagramGraphBase()}/${commentId}/replies`,
+  const response = await sendFetch(
+    accessToken,
+    `${instagramGraphBase(accessToken)}/${commentId}/replies`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenValue(accessToken)}`,
       },
       body: JSON.stringify({ message }),
     }
   );
 
-  return handleResponse(response);
+  return handleSendResponse(response, accessToken);
 }
 
 export async function getMediaComments(
-  accessToken: string,
+  accessToken: MetaCredential,
   mediaId: string
 ): Promise<InstagramComment[]> {
-  const url = new URL(`${instagramGraphBase()}/${mediaId}/comments`);
+  const url = new URL(`${instagramGraphBase(accessToken)}/${mediaId}/comments`);
   url.searchParams.set("fields", "id,text,from,timestamp");
-  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set("access_token", tokenValue(accessToken));
 
   const response = await fetch(url.toString());
   const data = await handleResponse<{ data: InstagramComment[] }>(response);
@@ -455,21 +510,21 @@ export async function getMediaComments(
  * results.
  */
 export async function getRecentMediaComments(
-  accessToken: string,
+  accessToken: MetaCredential,
   mediaId: string,
   sinceMs: number,
   max = 800
 ): Promise<InstagramComment[]> {
   const results: InstagramComment[] = [];
 
-  const first = new URL(`${instagramGraphBase()}/${mediaId}/comments`);
+  const first = new URL(`${instagramGraphBase(accessToken)}/${mediaId}/comments`);
   first.searchParams.set(
     "fields",
     "id,text,timestamp,from,username,replies{id,from,username}"
   );
   first.searchParams.set("order", "reverse_chronological");
   first.searchParams.set("limit", "50");
-  first.searchParams.set("access_token", accessToken);
+  first.searchParams.set("access_token", tokenValue(accessToken));
 
   let nextUrl: string | null = first.toString();
 
@@ -486,7 +541,7 @@ export async function getRecentMediaComments(
     // is nothing older worth fetching.
     const oldest = data[data.length - 1];
     if (oldest?.timestamp && Date.parse(oldest.timestamp) < sinceMs) break;
-    nextUrl = page.paging?.next ?? null;
+    nextUrl = graphNextPage(page.paging?.next, accessToken);
   }
 
   return results
@@ -500,12 +555,12 @@ export async function getRecentMediaComments(
  * comment sweep asks each candidate comment directly before answering it.
  */
 export async function getCommentReplies(
-  accessToken: string,
+  accessToken: MetaCredential,
   commentId: string
 ): Promise<{ id: string; username?: string; from?: { id: string; username?: string } }[]> {
-  const url = new URL(`${instagramGraphBase()}/${commentId}/replies`);
+  const url = new URL(`${instagramGraphBase(accessToken)}/${commentId}/replies`);
   url.searchParams.set("fields", "id,username,from");
-  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set("access_token", tokenValue(accessToken));
   const page = await handleResponse<{
     data?: { id: string; username?: string; from?: { id: string; username?: string } }[];
   }>(await fetch(url.toString()));
@@ -545,7 +600,7 @@ export interface InstagramConversation {
  * transport and minimal-list failures remain visible rather than looking empty.
  */
 export async function getConversations(
-  accessToken: string,
+  accessToken: MetaCredential,
   igUserId: string
 ): Promise<InstagramConversation[]> {
   const fields =
@@ -563,14 +618,14 @@ export async function getConversations(
   async function readPage(limit: number, requestedFields: string): Promise<Page> {
     // Never follow Meta's next URL: rebuild on our trusted host and carry the
     // token separately. A messages.paging cursor must never advance this list.
-    const url = new URL(`${instagramGraphBase()}/${igUserId}/conversations`);
+    const url = new URL(`${instagramGraphBase(accessToken)}/${igUserId}/conversations`);
     url.searchParams.set("platform", "instagram");
     url.searchParams.set("fields", requestedFields);
     url.searchParams.set("limit", String(limit));
     if (after) url.searchParams.set("after", after);
     return handleResponse<Page>(
       await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${accessToken}` },
+        headers: { Authorization: `Bearer ${tokenValue(accessToken)}` },
         signal: AbortSignal.timeout(10_000),
       })
     );
@@ -630,12 +685,12 @@ export async function getConversations(
  * for the 20 most recent messages, newest first.
  */
 export async function getConversationMessages(
-  accessToken: string,
+  accessToken: MetaCredential,
   conversationId: string
 ): Promise<InstagramMessage[]> {
-  const url = new URL(`${instagramGraphBase()}/${conversationId}`);
+  const url = new URL(`${instagramGraphBase(accessToken)}/${conversationId}`);
   url.searchParams.set("fields", "messages{id,created_time,from,to,message}");
-  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set("access_token", tokenValue(accessToken));
 
   const response = await fetch(url.toString());
   const data = await handleResponse<{ messages?: { data: InstagramMessage[] } }>(
@@ -644,13 +699,15 @@ export async function getConversationMessages(
   return data.messages?.data ?? [];
 }
 
-export async function getUserInfo(accessToken: string): Promise<InstagramUser> {
-  const url = new URL(`${instagramGraphBase()}/me`);
+export async function getUserInfo(accessToken: MetaCredential): Promise<InstagramUser> {
+  const url = new URL(`${instagramGraphBase(accessToken)}/${instagramUserPath(accessToken)}`);
   url.searchParams.set(
     "fields",
-    "id,user_id,username,name,profile_picture_url,followers_count"
+    typeof accessToken === "string"
+      ? "id,user_id,username,name,profile_picture_url,followers_count"
+      : "id,username,name,profile_picture_url,followers_count"
   );
-  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set("access_token", tokenValue(accessToken));
 
   const response = await fetch(url.toString());
   return handleResponse<InstagramUser>(response);
@@ -663,13 +720,13 @@ const MEDIA_FIELDS =
 const MEDIA_PAGE_SIZE = 100;
 
 export async function getUserMedia(
-  accessToken: string,
+  accessToken: MetaCredential,
   limit = 25
 ): Promise<InstagramMedia[]> {
-  const url = new URL(`${instagramGraphBase()}/me/media`);
+  const url = new URL(`${instagramGraphBase(accessToken)}/${instagramUserPath(accessToken)}/media`);
   url.searchParams.set("fields", MEDIA_FIELDS);
   url.searchParams.set("limit", limit.toString());
-  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set("access_token", tokenValue(accessToken));
 
   const response = await fetch(url.toString());
   const data = await handleResponse<{ data: InstagramMedia[] }>(response);
@@ -683,15 +740,15 @@ export async function getUserMedia(
  * forever (and so downstream per-media insight calls stay bounded).
  */
 export async function getAllUserMedia(
-  accessToken: string,
+  accessToken: MetaCredential,
   max = 500
 ): Promise<InstagramMedia[]> {
   const results: InstagramMedia[] = [];
 
-  const first = new URL(`${instagramGraphBase()}/me/media`);
+  const first = new URL(`${instagramGraphBase(accessToken)}/${instagramUserPath(accessToken)}/media`);
   first.searchParams.set("fields", MEDIA_FIELDS);
   first.searchParams.set("limit", String(Math.min(MEDIA_PAGE_SIZE, max)));
-  first.searchParams.set("access_token", accessToken);
+  first.searchParams.set("access_token", tokenValue(accessToken));
 
   let nextUrl: string | null = first.toString();
 
@@ -702,7 +759,7 @@ export async function getAllUserMedia(
       paging?: { next?: string };
     }>(response);
     results.push(...page.data);
-    nextUrl = page.paging?.next ?? null;
+    nextUrl = graphNextPage(page.paging?.next, accessToken);
   }
 
   return results.slice(0, max);
@@ -717,13 +774,13 @@ export async function getAllUserMedia(
  * the given media (e.g. `views` is not valid for image posts on some accounts).
  */
 export async function getMediaInsights(
-  accessToken: string,
+  accessToken: MetaCredential,
   mediaId: string,
   metrics: string[]
 ): Promise<InstagramMediaInsights> {
-  const url = new URL(`${instagramGraphBase()}/${mediaId}/insights`);
+  const url = new URL(`${instagramGraphBase(accessToken)}/${mediaId}/insights`);
   url.searchParams.set("metric", metrics.join(","));
-  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set("access_token", tokenValue(accessToken));
 
   const response = await fetch(url.toString());
   const data = await handleResponse<{
@@ -763,7 +820,7 @@ const FOLLOWER_INSIGHT_MAX_DAYS = 30;
  * anchoring on a known `followers_count` and walking backwards.
  */
 export async function getFollowerCountSeries(
-  accessToken: string,
+  accessToken: MetaCredential,
   instagramAccountId: string,
   days: number = FOLLOWER_INSIGHT_MAX_DAYS
 ): Promise<FollowerCountPoint[] | null> {
@@ -771,12 +828,12 @@ export async function getFollowerCountSeries(
   const until = Math.floor(Date.now() / 1000);
   const since = until - (span - 1) * 86_400;
 
-  const url = new URL(`${instagramGraphBase()}/${instagramAccountId}/insights`);
+  const url = new URL(`${instagramGraphBase(accessToken)}/${instagramAccountId}/insights`);
   url.searchParams.set("metric", "follower_count");
   url.searchParams.set("period", "day");
   url.searchParams.set("since", String(since));
   url.searchParams.set("until", String(until));
-  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set("access_token", tokenValue(accessToken));
 
   try {
     const response = await fetch(url.toString());
@@ -842,15 +899,15 @@ export async function refreshLongLivedToken(
 
 export async function subscribeInstagramAccountToWebhooks(
   instagramAccountId: string,
-  accessToken: string
+  accessToken: MetaCredential
 ): Promise<{ success: boolean }> {
   const response = await fetch(
-    `${instagramGraphBase()}/${instagramAccountId}/subscribed_apps`,
+    `${instagramGraphBase(accessToken)}/${instagramAccountId}/subscribed_apps`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenValue(accessToken)}`,
       },
       body: JSON.stringify({
         subscribed_fields: ["comments", "messages"],
@@ -864,7 +921,7 @@ export async function subscribeInstagramAccountToWebhooks(
 export async function debugToken(inputToken: string, accessToken: string) {
   const url = new URL(`${facebookGraphBase()}/debug_token`);
   url.searchParams.set("input_token", inputToken);
-  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set("access_token", tokenValue(accessToken));
   const response = await fetch(url.toString());
   return handleResponse(response);
 }

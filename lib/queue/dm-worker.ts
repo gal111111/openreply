@@ -1,3 +1,4 @@
+import { isStopRequest, suppressSerriniSender } from "@/lib/meta/serrini-suppression";
 import { createHash } from "node:crypto";
 import { UnrecoverableError, Worker, type Job } from "bullmq";
 import {
@@ -15,6 +16,7 @@ import {
 import { prisma } from "@/lib/db/client";
 import {
   MetaApiError,
+  MetaDeliveryUnconfirmedError,
   RateLimitError,
   TokenExpiredError,
   getUserFollowStatus,
@@ -284,6 +286,42 @@ async function sendRevealDirectMessage({
 }
 
 
+function isUnconfirmedDelivery(error: unknown, context?: InstagramContext): boolean {
+  return error instanceof ZernioDeliveryUnconfirmedError ||
+    error instanceof MetaDeliveryUnconfirmedError ||
+    (context?.provider === "META" && typeof context.accessToken !== "string" &&
+      !(error instanceof MetaApiError));
+}
+
+async function claimUnifiedDmAttempt(
+  context: InstagramContext,
+  data: {
+    workspaceId: string;
+    automationId: string;
+    instagramAccountId: string;
+    commenterId: string;
+    commentId: string;
+    commentText: string;
+    commenterName?: string | null;
+    matchedKeyword?: string | null;
+  }
+): Promise<boolean> {
+  if (context.provider !== "META" || typeof context.accessToken === "string") return true;
+  await prisma.dmLog.upsert({
+    where: { automationId_commentId: { automationId: data.automationId, commentId: data.commentId } },
+    create: { ...data, status: "PENDING" },
+    update: {},
+  });
+  const claim = await prisma.dmLog.updateMany({
+    where: {
+      automationId: data.automationId, commentId: data.commentId,
+      status: { not: "SENT" }, dmDeliveryUnconfirmed: false,
+    },
+    data: { dmDeliveryUnconfirmed: true },
+  });
+  return claim.count === 1;
+}
+
 function connectionScope(data: DmQueueJob) {
   return data.accountConnectionId ? { instagramAccountId: data.accountConnectionId } : {};
 }
@@ -513,6 +551,13 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
         return;
       }
       try {
+        if (accessToken.provider === "META" && typeof accessToken.accessToken !== "string") {
+          const claim = await prisma.dmLog.updateMany({
+            where: { automationId: automation.id, commentId, publicReplySentAt: null, publicReplyDeliveryUnconfirmed: false },
+            data: { publicReplyDeliveryUnconfirmed: true },
+          });
+          if (!claim.count) return;
+        }
         const chosen = replyPool[Math.floor(Math.random() * replyPool.length)];
         const publicReply = renderMessageWithTracking({
           message: chosen,
@@ -529,7 +574,7 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
           where: {
             automationId_commentId: { automationId: automation.id, commentId },
           },
-          data: { publicReplySentAt: new Date(), publicReplyError: null },
+          data: { publicReplySentAt: new Date(), publicReplyError: null, publicReplyDeliveryUnconfirmed: false },
         });
       } catch (error) {
         console.error(
@@ -544,7 +589,7 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
                 commentId,
               },
             },
-            data: { publicReplyError: formatError(error), publicReplyDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError },
+            data: { publicReplyError: formatError(error), publicReplyDeliveryUnconfirmed: isUnconfirmedDelivery(error, accessToken) },
           })
           .catch(() => {});
       }
@@ -695,7 +740,7 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
           status: "FAILED",
           attempts: job.attemptsMade + 1,
           errorMessage: formatError(error),
-          dmDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError,
+          dmDeliveryUnconfirmed: isUnconfirmedDelivery(error, accessToken),
         },
       });
       throw error;
@@ -755,6 +800,17 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
     }
 
     try {
+      const claimed = await claimUnifiedDmAttempt(accessToken, {
+        workspaceId: automation.workspaceId, automationId: automation.id,
+        instagramAccountId: automation.instagramAccountId,
+        commenterId, commenterName, commentId, commentText,
+        matchedKeyword: matchResult.matchedKeyword,
+      });
+      if (!claimed) {
+        if (rateLimit?.reserved) await releaseDMSlot(instagramAccountId);
+        await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+        continue;
+      }
       if (useOpeningDm) {
         const openingText = renderMessageWithTracking({
           message: automation.openingDmMessage as string,
@@ -863,6 +919,7 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
         data: {
           status: "SENT",
           dmSentAt: new Date(),
+          dmDeliveryUnconfirmed: false,
           followPromptSentAt: sendFollowPrompt ? new Date() : null,
           errorMessage: null,
         },
@@ -890,7 +947,7 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
           status: "FAILED",
           attempts: job.attemptsMade + 1,
           errorMessage: formatError(error),
-          dmDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError,
+          dmDeliveryUnconfirmed: isUnconfirmedDelivery(error, accessToken),
         },
       });
       throw error;
@@ -938,7 +995,7 @@ async function sendPostbackOnce({
       await prisma.postbackDelivery.delete({ where: { id: operationId } });
       throw error;
     }
-    throw error instanceof ZernioDeliveryUnconfirmedError
+    throw isUnconfirmedDelivery(error)
       ? error
       : new ZernioDeliveryUnconfirmedError();
   }
@@ -1153,8 +1210,10 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
         commentId: dedupeId,
         status: "SENT",
         dmSentAt: new Date(),
+          dmDeliveryUnconfirmed: false,
       },
-      update: { status: "SENT", dmSentAt: new Date(), errorMessage: null },
+      update: { status: "SENT", dmSentAt: new Date(),
+          dmDeliveryUnconfirmed: false, errorMessage: null },
     });
   } catch (error) {
     await releaseWorkspaceDMReservation(
@@ -1169,7 +1228,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     // failure the user can act on — so don't log it as FAILED and don't retry
     // it against a window that cannot reopen on its own. It still delivers in
     // the case that does work: the user replied by typing instead of tapping.
-    if (fallback && !(error instanceof ZernioDeliveryUnconfirmedError)) {
+    if (fallback && !(isUnconfirmedDelivery(error))) {
       console.log(
         "[DM Worker] Read fallback not delivered (messaging window closed):",
         formatError(error),
@@ -1194,12 +1253,12 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
         commentId: dedupeId,
         status: "FAILED",
         errorMessage: formatError(error),
-        dmDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError,
+        dmDeliveryUnconfirmed: isUnconfirmedDelivery(error, accessToken),
       },
       update: {
         status: "FAILED",
         errorMessage: formatError(error),
-        dmDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError,
+        dmDeliveryUnconfirmed: isUnconfirmedDelivery(error, accessToken),
       },
     });
     throw error;
@@ -1494,6 +1553,10 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
     }
 
     try {
+      if (!(await claimUnifiedDmAttempt(accessToken, logBase))) {
+        await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+        continue;
+      }
       if (sendFollowPrompt) {
         const promptText = renderMessageWithoutLink({
           message:
@@ -1553,11 +1616,13 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           commenterName,
           status: "SENT",
           dmSentAt: new Date(),
+          dmDeliveryUnconfirmed: false,
           followPromptSentAt: sendFollowPrompt ? new Date() : null,
         },
         update: {
           status: "SENT",
           dmSentAt: new Date(),
+          dmDeliveryUnconfirmed: false,
           followPromptSentAt: sendFollowPrompt ? new Date() : null,
           errorMessage: null,
         },
@@ -1580,13 +1645,13 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           status: "FAILED",
           attempts: job.attemptsMade + 1,
           errorMessage: formatError(error),
-          dmDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError,
+          dmDeliveryUnconfirmed: isUnconfirmedDelivery(error, accessToken),
         },
         update: {
           status: "FAILED",
           attempts: job.attemptsMade + 1,
           errorMessage: formatError(error),
-          dmDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError,
+          dmDeliveryUnconfirmed: isUnconfirmedDelivery(error, accessToken),
         },
       });
       throw error;
@@ -1609,10 +1674,30 @@ async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
 
 async function processJob(job: Job<DmQueueJob>): Promise<void> {
   try {
+    const account = await prisma.instagramAccount.findUnique({
+      where: { instagramId: job.data.instagramAccountId },
+      select: { id: true, metaLoginMode: true },
+    });
+    if (account?.metaLoginMode === "UNIFIED") {
+      const senderId = "senderId" in job.data ? job.data.senderId
+        : "commenterId" in job.data ? job.data.commenterId : job.data.userId;
+      const text = "messageText" in job.data ? job.data.messageText
+        : "commentText" in job.data ? job.data.commentText : "";
+      const inboundId = "messageId" in job.data ? job.data.messageId
+        : "commentId" in job.data ? job.data.commentId : String(job.id);
+      if (isStopRequest(text)) {
+        await suppressSerriniSender(account.id, senderId, inboundId);
+        return;
+      }
+      const suppressed = await prisma.instagramReplySuppression.findUnique({
+        where: { instagramAccountId_senderId: { instagramAccountId: account.id, senderId } },
+      });
+      if (suppressed) return;
+    }
     await dispatchJob(job);
   } catch (error) {
-    if (error instanceof ZernioDeliveryUnconfirmedError)
-      throw new UnrecoverableError(error.message);
+    if (isUnconfirmedDelivery(error))
+      throw new UnrecoverableError(error instanceof Error ? error.message : "Send result is unknown");
     throw error;
   }
 }
