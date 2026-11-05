@@ -213,7 +213,7 @@ describe("Serrini webhook isolation and stopping", () => {
   ])("recognises a stop request %s", (text) => {
     expect(isStopRequest(text)).toBe(true);
   });
-  it.each(["ECC", "AI", "how do I stop this error?"])(
+  it.each(["ECC", "AI", "how do I stop this error?", "如何停止這個錯誤"])(
     "allows a regular resource request %s",
     (text) => {
       expect(isStopRequest(text)).toBe(false);

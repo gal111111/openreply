@@ -1073,7 +1073,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   }
 
   const operationId =
-    accessToken.provider === "ZERNIO"
+    (accessToken.provider === "ZERNIO" || typeof accessToken.accessToken !== "string")
       ? createHash("sha256")
           .update(
             JSON.stringify([
