@@ -1,3 +1,7 @@
+> **公司版指引（繁體中文）**：我們用自己部署的版本 <https://openreply.up.railway.app>，已連接 @skillaihk，用電郵登入連結登入。
+> 日常怎樣加關鍵字、改私信文案、看結果、誰管理登入，看 [docs/zh/日常操作.md](docs/zh/日常操作.md)；新片發佈後系統會自動建好活動。
+> 以下英文內容是上游開源版說明，只有部署和開發才需要看。
+
 <div align="center">
 
 # OpenReply

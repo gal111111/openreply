@@ -1,3 +1,5 @@
+> 公司版：我們現在不用這套腳本部署，改用 `railway up` 從本機分支推上線，步驟見 [docs/zh/日常操作.md](../../docs/zh/日常操作.md) 第 8 節。以下是上游「從 GitHub fork 部署」的流程。
+
 # Deploying OpenReply on Railway
 
 Everything in one Railway project, `openreply` (workspace "My Projects"): Postgres, Redis, and three app services built from the repo-root `Dockerfile`. Login mail goes out through Gmail SMTP. Nothing in this folder runs by itself; you run each step.
