@@ -189,6 +189,15 @@ describe("Serrini OAuth provenance", () => {
       "permissions are incomplete",
     );
   });
+  it.each([0, Math.floor(Date.now() / 1000) + 61 * 86400])(
+    "rejects a token expiry outside the approved 60 days: %s",
+    async (expires_at) => {
+      respond({ client_business_id: "222" });
+      respond({ data: { is_valid: true, app_id: "111", scopes: SERRINI_SCOPES, expires_at } });
+      respond({ data: [{ id: "12345", username: "serrini666" }] });
+      await expect(getSerriniAssets("system-token")).rejects.toThrow();
+    },
+  );
 });
 
 describe("Serrini webhook isolation and stopping", () => {

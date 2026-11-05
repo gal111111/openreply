@@ -141,6 +141,10 @@ export async function getSerriniAssets(accessToken: string) {
     throw new Error("No approved Serrini Instagram account was selected");
   if (token.expires_at * 1000 <= Date.now())
     throw new Error("Serrini token has expired");
+  // The approved connection is time-limited even if Meta's preview labels it
+  // otherwise. Never persist a non-expiring or longer-lived credential.
+  if (token.expires_at * 1000 > Date.now() + (60 * 86400 + 300) * 1000)
+    throw new Error("Serrini token exceeds the approved 60-day lifetime");
   return {
     businessId,
     accounts: selected,
