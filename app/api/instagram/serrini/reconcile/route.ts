@@ -48,17 +48,25 @@ export async function POST(request:NextRequest) {
       if(!body.resources?.length) return reply({error:"Resource manifest required"},400);
       // Preparation disables existing matching campaigns before any history read.
       await prisma.automation.updateMany({where:{instagramAccountId:account.id,sourceSystem:"serrini-resource-v1"},data:{isActive:false}});
-      const subscribed=await subscribeInstagramAccountToWebhooks(account.instagramId,token);
-      if(subscribed.success!==true) throw new Error("Webhook subscription not confirmed");
-      await prisma.instagramAccount.update({where:{id:account.id},data:{webhookSubscribed:true}});
+      if (!account.webhookSubscribed) {
+        const subscribed=await subscribeInstagramAccountToWebhooks(account.instagramId,token);
+        if(subscribed.success!==true) throw new Error("Webhook subscription not confirmed");
+        await prisma.instagramAccount.update({where:{id:account.id},data:{webhookSubscribed:true}});
+      }
       const media=await getAllUserMedia(token);
       const conversations=await getConversations(token,account.instagramId);
       if(conversations.length>=50 || conversations.some(c=>c.detailsUnavailable)) throw new Error("History requires further pagination or unavailable conversation review");
+      const manualHolds=new Set(body.resources.flatMap(r=>r.heldNames.map(n=>n.toLowerCase())));
+      const knownMarkers=body.resources.flatMap(r=>r.guideMarkers);
       const historical: {name:string;id:string;outbound:string[];incomplete:boolean}[]=[];
       for(const conversation of conversations) {
         const participant=conversation.participants?.data.find(p=>p.id!==account.instagramId);
         if(!participant?.id || !participant.username) throw new Error("Conversation identity unavailable");
-        const messages=await getConversationMessages(token,conversation.id);
+        // A verified manual hold cannot send; its API participant identity is
+        // sufficient to preserve the exclusion without re-reading the thread.
+        const messages=manualHolds.has(participant.username.toLowerCase())
+          ? conversation.messages?.data??[]
+          : await getConversationMessages(token,conversation.id);
         for(const m of messages) if(m.from?.id===participant.id && isStopRequest(m.message??"")) await suppressSerriniSender(account.id,participant.id,m.id);
         historical.push({name:participant.username.toLowerCase(),id:participant.id,outbound:messages.filter(m=>m.from?.id===account.instagramId).map(m=>m.message??""),incomplete:messages.length>=20});
       }
@@ -70,17 +78,10 @@ export async function POST(request:NextRequest) {
         const priorHistory=previous ? await getResourceHistory(context.workspaceId,account.id,previous.id) : undefined;
         const heldNames=new Set([...resource.heldNames.map(n=>n.toLowerCase()),...(priorHistory?.heldNames??[])]);
         const heldIds=new Set<string>(priorHistory?.heldIds??[]);
-        const sourceComments=await getRecentMediaComments(token,post.id,Date.now()-7*86400000,2000);
-        if(sourceComments.length>=2000) throw new Error("Comment history safety bound reached");
-        for(const comment of sourceComments) {
-          const name=(comment.from?.username??comment.username)?.toLowerCase();
-          if(name && heldNames.has(name) && comment.from?.id) heldIds.add(comment.from.id);
-          if(comment.from?.id && isStopRequest(comment.text??"")) await suppressSerriniSender(account.id,comment.from.id,comment.id);
-        }
         for(const h of historical) {
           const gotResource=h.outbound.some(text=>resource.guideMarkers.some(marker=>text.includes(marker)));
           // Ambiguous historic outbound is held for review, never resent as if history were empty.
-          if(gotResource || h.incomplete || h.outbound.length>0) { heldNames.add(h.name);heldIds.add(h.id); }
+          if(gotResource || h.incomplete || h.outbound.some(text=>text.trim() && !knownMarkers.some(marker=>text.includes(marker)))) { heldNames.add(h.name);heldIds.add(h.id); }
           if(heldNames.has(h.name)) heldIds.add(h.id);
         }
         const externalId=`serrini-resource-v1:${account.instagramId}:${resource.key}`;
