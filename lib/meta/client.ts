@@ -221,7 +221,18 @@ export async function sendPrivateReply(
     }
   );
 
-  return handleSendResponse(response, accessToken);
+  const receipt = await handleSendResponse<{ recipient_id: string; message_id: string }>(response, accessToken);
+  if (typeof accessToken !== "string" && ["17841415718399486", "17841480865798985"].includes(instagramAccountId)) {
+    try {
+      const url = new URL(`${instagramGraphBase(accessToken)}/${receipt.message_id}`);
+      url.searchParams.set("fields", "id,message,from,to");
+      const actual = await handleResponse<InstagramMessage>(await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${tokenValue(accessToken)}` }, signal: AbortSignal.timeout(10_000),
+      }));
+      if (actual.id !== receipt.message_id || actual.message !== message || actual.from?.id !== instagramAccountId || !actual.to?.data.some(p => p.id === receipt.recipient_id)) throw new MetaDeliveryUnconfirmedError();
+    } catch { throw new MetaDeliveryUnconfirmedError(); }
+  }
+  return receipt;
 }
 
 /**
@@ -482,7 +493,19 @@ export async function sendCommentReply(
     }
   );
 
-  return handleSendResponse(response, accessToken);
+  const receipt = await handleSendResponse<{ id: string }>(response, accessToken);
+  if (typeof accessToken !== "string" && ["17841415718399486", "17841480865798985"].includes(accessToken.instagramId)) {
+    try {
+      const url = new URL(`${instagramGraphBase(accessToken)}/${receipt.id}`);
+      url.searchParams.set("fields", "id,text,from");
+      const actual = await handleResponse<{id:string;text:string;from?:{id:string}}>(await fetch(url.toString(), {
+        headers:{Authorization:`Bearer ${tokenValue(accessToken)}`},signal:AbortSignal.timeout(10_000),
+      }));
+      const replies = await getCommentReplies(accessToken, commentId);
+      if(actual.id!==receipt.id || actual.text!==message || actual.from?.id!==accessToken.instagramId || !replies.some(r=>r.id===receipt.id)) throw new MetaDeliveryUnconfirmedError();
+    } catch { throw new MetaDeliveryUnconfirmedError(); }
+  }
+  return receipt;
 }
 
 export async function getMediaComments(

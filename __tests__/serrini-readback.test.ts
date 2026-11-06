@@ -1,0 +1,8 @@
+import {beforeEach,expect,it,vi} from "vitest";
+import {sendPrivateReply,MetaDeliveryUnconfirmedError,sendCommentReply} from "@/lib/meta/client";
+const request=vi.fn();const account="17841480865798985";const credential={loginMode:"UNIFIED" as const,instagramId:account,accessToken:"test-only"};
+const respond=(x:unknown)=>request.mockResolvedValueOnce(new Response(JSON.stringify(x),{status:200}));
+beforeEach(()=>{request.mockReset();vi.stubGlobal("fetch",request)});
+it("requires exact private body, sender and recipient readback before accepting delivery",async()=>{respond({message_id:"m",recipient_id:"r"});respond({id:"m",message:"resource",from:{id:account},to:{data:[{id:"r"}]}});expect(await sendPrivateReply(credential,account,"comment","resource")).toEqual({message_id:"m",recipient_id:"r"});expect(request).toHaveBeenCalledTimes(2)});
+it.each(["wrong-body","wrong-recipient","wrong-sender"])("holds an accepted POST with %s readback as unknown",async(kind)=>{respond({message_id:"m",recipient_id:"r"});respond({id:"m",message:kind==="wrong-body"?"other":"resource",from:{id:kind==="wrong-sender"?"other":account},to:{data:[{id:kind==="wrong-recipient"?"other":"r"}]}});await expect(sendPrivateReply(credential,account,"comment","resource")).rejects.toBeInstanceOf(MetaDeliveryUnconfirmedError);expect(request).toHaveBeenCalledTimes(2)});
+it("requires a public reply to be present under the actual parent comment",async()=>{respond({id:"reply"});respond({id:"reply",text:"發給你啦",from:{id:account}});respond({data:[{id:"different"}]});await expect(sendCommentReply(credential,"parent","發給你啦")).rejects.toBeInstanceOf(MetaDeliveryUnconfirmedError)});

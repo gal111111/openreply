@@ -1,3 +1,4 @@
+import { getResourceHistory, historyAllows, SERRINI_IDS } from "@/lib/meta/serrini-history";
 import { isStopRequest, suppressSerriniSender } from "@/lib/meta/serrini-suppression";
 import { createHash } from "node:crypto";
 import { UnrecoverableError, Worker, type Job } from "bullmq";
@@ -29,6 +30,7 @@ import {
   sendPrivateReplyWithLinkButton,
 } from "@/lib/instagram/provider";
 import {
+  getCommentReplies,
   createInstagramContext,
   hasInstagramCredentials,
   type InstagramContext,
@@ -333,9 +335,15 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     console.log(`[DM Worker] Comment ${commentId} is already being handled; skipped`);
     return;
   }
+  const personLock = SERRINI_IDS.has(instagramAccountId) ? `person_${job.data.commenterId}` : null;
+  if (personLock && !(await acquireCommentLock(instagramAccountId, personLock))) {
+    await releaseCommentLock(instagramAccountId, commentId);
+    return;
+  }
   try {
     await processCommentLocked(job);
   } finally {
+    if (personLock) await releaseCommentLock(instagramAccountId, personLock);
     await releaseCommentLock(instagramAccountId, commentId);
   }
 }
@@ -398,6 +406,11 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
 
     if (!matchResult.matched) {
       continue;
+    }
+
+    if (SERRINI_IDS.has(instagramAccountId)) {
+      const history = await getResourceHistory(automation.workspaceId, automation.instagramAccountId, automation.id);
+      if (!history || history.postId !== automation.postId || history.messageHash !== createHash("sha256").update(automation.dmMessage).digest("hex") || !historyAllows(history, commenterName, commenterId)) continue;
     }
 
     const existingLog = await prisma.dmLog.findUnique({
@@ -551,6 +564,10 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
         return;
       }
       try {
+        if (SERRINI_IDS.has(instagramAccountId)) {
+          const replies = await getCommentReplies({context: accessToken, commentId});
+          if (replies.some(r => r.from?.id === instagramAccountId || (r.from?.username ?? r.username)?.toLowerCase() === automation.instagramAccount.username.toLowerCase())) return;
+        }
         if (accessToken.provider === "META" && typeof accessToken.accessToken !== "string") {
           const claim = await prisma.dmLog.updateMany({
             where: { automationId: automation.id, commentId, publicReplySentAt: null, publicReplyDeliveryUnconfirmed: false },
@@ -598,7 +615,8 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
     // DM already sent on an earlier pass: only the public reply may still be
     // missing. Don't re-send the DM.
     if (!needsDm) {
-      await sendPublicReply();
+      // An unknown private send is not proof of delivery.
+      if (alreadyDmd && !existingLog?.dmDeliveryUnconfirmed) await sendPublicReply();
       continue;
     }
 
@@ -608,7 +626,9 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
       where: {
         automationId: automation.id,
         commenterId,
-        status: "SENT",
+        ...(SERRINI_IDS.has(instagramAccountId)
+          ? { OR: [{ status: "SENT" as const }, { dmDeliveryUnconfirmed: true }] }
+          : { status: "SENT" as const }),
         commentId: { not: commentId },
         // A "follow first" prompt is not the content: once they follow, a new
         // comment must still get it.
@@ -900,13 +920,16 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
           commenterName,
           trackedLinks: automation.trackedLinks,
         });
-        await sendPrivateReply({
+        const receipt = await sendPrivateReply({
           context: accessToken,
           instagramAccountId: automation.instagramAccount.instagramId,
           commentId: commentId,
           message: dmMessage,
           postId: mediaId,
         });
+        if (SERRINI_IDS.has(instagramAccountId)) {
+          await prisma.operationalEvent.create({data:{workspaceId:automation.workspaceId,source:"SYSTEM",message:"Serrini private resource readback verified",payload:{account:automation.instagramAccount.username,commentId,mediaId,recipient:commenterName??null,recipientId:commenterId,body:dmMessage,receipt}}});
+        }
       }
 
       await prisma.dmLog.update({
