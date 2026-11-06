@@ -13,7 +13,7 @@ import { isStopRequest, suppressSerriniSender } from "@/lib/meta/serrini-suppres
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 
 export const dynamic = "force-dynamic";
-const resourceSchema = z.object({ key: z.enum(["ECC","COUNCIL","AI","SCRIPT","EDITOR","BROCHURE","EVENT"]), shortcode: z.string().regex(/^[A-Za-z0-9_-]+$/), keywords: z.array(z.string().min(1).max(50)).min(1).max(10), message: z.string().min(1).max(1000), guideMarkers: z.array(z.string().min(5)).min(1).max(3), heldNames: z.array(z.string().regex(/^[a-zA-Z0-9_.]+$/)).max(200).default([]) });
+const resourceSchema = z.object({ key: z.enum(["ECC","COUNCIL","AI","SCRIPT","EDITOR","BROCHURE","EVENT","LEARNH"]), shortcode: z.string().regex(/^[A-Za-z0-9_-]+$/), keywords: z.array(z.string().min(1).max(50)).min(1).max(10), message: z.string().min(1).max(1000), guideMarkers: z.array(z.string().min(5)).min(1).max(3), heldNames: z.array(z.string().regex(/^[a-zA-Z0-9_.]+$/)).max(200).default([]) });
 const bodySchema = z.object({ action: z.enum(["prepare","activate","backfill","reconcile"]), account: z.enum(["serrinion","serrini666"]), resources: z.array(resourceSchema).max(7).optional() });
 const ids: Record<string,string> = {serrinion:"17841415718399486",serrini666:"17841480865798985"};
 function reply(data: unknown, status=200) { return NextResponse.json(data,{status,headers:{"Cache-Control":"no-store"}}); }

@@ -31,3 +31,10 @@ it("backfills only two fresh requests, spaces them, and preserves existing unkno
  expect(mocks.enqueue.mock.calls.map(c=>c[1].commentId)).toEqual(["fresh1","fresh2"]);
  expect(mocks.enqueue.mock.calls.map(c=>c[2].delay)).toEqual([0,60000]);
 });
+
+it("accepts the separately verified LearnHarness resource without reusing ECC",async()=>{
+ mocks.profile.mockResolvedValue({id:"wrong",username:"serrinion"});
+ const req=new NextRequest("https://openreply.up.railway.app/api/instagram/serrini/reconcile",{method:"POST",headers:{Origin:"https://openreply.up.railway.app","Content-Type":"application/json"},body:JSON.stringify({action:"prepare",account:"serrinion",resources:[{key:"LEARNH",shortcode:"DfXk_29v_op",keywords:["学习","學習"],message:"你要的 LearnHarness 官方网站在这里：https://learnharness.ai/",guideMarkers:["learnharness.ai"]}]})});
+ const response=await POST(req);expect(response.status).toBe(502);expect(mocks.account).toHaveBeenCalledWith(expect.objectContaining({where:expect.objectContaining({username:"serrinion",instagramId:"17841415718399486"})}));
+ expect(mocks.update).not.toHaveBeenCalled();
+});
