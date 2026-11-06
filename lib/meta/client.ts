@@ -32,8 +32,8 @@ export class TokenExpiredError extends MetaApiError {
 }
 
 export class RateLimitError extends MetaApiError {
-  constructor(message: string, fbTraceId?: string) {
-    super(368, undefined, fbTraceId, message);
+  constructor(message: string, fbTraceId?: string, code = 368, subcode?: number) {
+    super(code, subcode, fbTraceId, message);
     this.name = "RateLimitError";
   }
 }
@@ -142,7 +142,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
       case 368:
       case 4:
       case 17:
-        throw new RateLimitError(message, traceId);
+        throw new RateLimitError(message, traceId, code, subcode);
       case 10:
       case 100:
       case 200:

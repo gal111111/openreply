@@ -142,6 +142,6 @@ export async function POST(request:NextRequest) {
     return reply({queued,held,matched:seen,complete:false,note:"Queued is not sent; inspect verified platform receipts."});
   } catch(error) {
     // Graph errors may carry request details: only fixed code/name leaves this route.
-    return reply({error:"Serrini reconciliation failed",category:error instanceof Error ? error.name : "unknown",code:typeof error==="object" && error && "code" in error ? error.code : null},502);
+    return reply({error:"Serrini reconciliation failed",category:error instanceof Error ? error.name : "unknown",code:typeof error==="object" && error && "code" in error ? error.code : null,subcode:typeof error==="object" && error && "subcode" in error ? error.subcode ?? null : null},502);
   }
 }
