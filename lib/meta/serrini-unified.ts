@@ -4,7 +4,13 @@ import { z } from "zod";
 
 export const SERRINI_STATE_COOKIE = "serrini_instagram_oauth";
 export const SERRINI_STATE_PREFIX = "serrini-unified:";
-export const SERRINI_HANDLES = new Set(["serrinion", "serrini666"]);
+// These are the two user-approved assets, verified in Meta Business Settings.
+// Selector IDs from the consent dialog are a different namespace.
+export const SERRINI_ACCOUNTS = [
+  { id: "17841415718399486", username: "serrinion" },
+  { id: "17841480865798985", username: "serrini666" },
+] as const;
+export const SERRINI_HANDLES = new Set<string>(SERRINI_ACCOUNTS.map(a => a.username));
 export const SERRINI_SCOPES = [
   "instagram_basic",
   "instagram_content_publish",
@@ -131,6 +137,10 @@ export async function getSerriniAssets(accessToken: string) {
   if (missingScopes.length) {
     throw new SerriniConnectionError("scope_check", 0, `missing_${missingScopes.join("+")}`, "Serrini app permissions are incomplete");
   }
+  if (token.expires_at * 1000 <= Date.now())
+    throw new Error("Serrini token has expired");
+  if (token.expires_at * 1000 > Date.now() + (60 * 86400 + 300) * 1000)
+    throw new Error("Serrini token exceeds the approved 60-day lifetime");
   const accounts: z.infer<typeof accountSchema>[] = [];
   let path: string | null =
     "me/assigned_instagram_accounts?fields=id,username&limit=100";
@@ -146,19 +156,39 @@ export async function getSerriniAssets(accessToken: string) {
     if (cursors.size >= 20)
       throw new Error("Assigned Instagram account listing exceeded its limit");
   }
-  const selected = accounts.filter((account) =>
+  let selected = accounts.filter((account) =>
     SERRINI_HANDLES.has(account.username.toLowerCase()),
   );
+  let verificationMethod: "assigned_accounts" | "direct_approved_accounts" = "assigned_accounts";
+  if (accounts.length === 0) {
+    // Live Meta evidence: this edge can return [] while both exact approved
+    // Instagram nodes are readable by the same fresh business credential.
+    // An empty edge is never sufficient proof. Verify *both* fixed canonical
+    // IDs, exact handles and account-media access. Any error rejects the whole
+    // connection; never infer access from a public username or selector ID.
+    selected = await Promise.all(SERRINI_ACCOUNTS.map(async (expected) => {
+      const profile = accountSchema.parse(await graphJson(
+        `${expected.id}?fields=id,username`, accessToken, "approved_profile_read",
+      ));
+      if (profile.id !== expected.id || profile.username.toLowerCase() !== expected.username)
+        throw new SerriniConnectionError("account_check", 0, "approved_identity_mismatch");
+      const media = await graphJson(
+        `${expected.id}/media?fields=id&limit=1`, accessToken, "approved_media_read",
+      );
+      z.object({ data: z.array(z.object({ id })) }).parse(media);
+      return profile;
+    }));
+    verificationMethod = "direct_approved_accounts";
+  }
   if (!selected.length)
     throw new SerriniConnectionError("account_check", 0, `assigned_count_${accounts.length}`, "No approved Serrini Instagram account was selected");
-  if (token.expires_at * 1000 <= Date.now())
-    throw new Error("Serrini token has expired");
-  // The approved connection is time-limited even if Meta's preview labels it
-  // otherwise. Never persist a non-expiring or longer-lived credential.
-  if (token.expires_at * 1000 > Date.now() + (60 * 86400 + 300) * 1000)
-    throw new Error("Serrini token exceeds the approved 60-day lifetime");
+  for (const account of selected) {
+    if (!SERRINI_ACCOUNTS.some(expected => expected.id === account.id && expected.username === account.username.toLowerCase()))
+      throw new SerriniConnectionError("account_check", 0, "approved_identity_mismatch");
+  }
   return {
     businessId,
+    verificationMethod,
     accounts: selected,
     scopes: token.scopes,
     expiresAt: new Date(token.expires_at * 1000),

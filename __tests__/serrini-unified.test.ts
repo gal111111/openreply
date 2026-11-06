@@ -45,7 +45,7 @@ function validAssets(scopes = SERRINI_SCOPES, appId = "111") {
       expires_at: Math.floor(Date.now() / 1000) + 3600,
     },
   });
-  respond({ data: [{ id: "12345", username: "serrini666" }] });
+  respond({ data: [{ id: "17841480865798985", username: "serrini666" }] });
 }
 
 beforeEach(() => {
@@ -170,9 +170,64 @@ describe("Serrini OAuth provenance", () => {
     validAssets();
     const result = await getSerriniAssets("system-token");
     expect(result.businessId).toBe("222");
-    expect(result.accounts).toEqual([{ id: "12345", username: "serrini666" }]);
+    expect(result.accounts).toEqual([{ id: "17841480865798985", username: "serrini666" }]);
     expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
+  function emptyAssets() {
+    respond({ client_business_id: "222" });
+    respond({ data: { is_valid: true, app_id: "111", scopes: SERRINI_SCOPES, expires_at: Math.floor(Date.now()/1000)+3600 } });
+    respond({ data: [] });
+  }
+  it("accepts an empty enumeration only after both exact canonical identities and media access pass", async () => {
+    emptyAssets();
+    // Promise.all starts both profile reads before either media read.
+    respond({ id: "17841415718399486", username: "serrinion" });
+    respond({ id: "17841480865798985", username: "serrini666" });
+    respond({ data: [{ id: "179123456789" }] });
+    respond({ data: [] });
+    const result = await getSerriniAssets("system-token");
+    expect(result.verificationMethod).toBe("direct_approved_accounts");
+    expect(result.accounts.map(a=>a.username)).toEqual(["serrinion", "serrini666"]);
+    const urls = fetchMock.mock.calls.map(c=>String(c[0]));
+    expect(urls).toContain("https://graph.facebook.com/v27.0/17841415718399486/media?fields=id&limit=1");
+    expect(urls).toContain("https://graph.facebook.com/v27.0/17841480865798985/media?fields=id&limit=1");
+    expect(fetchMock.mock.calls.every(c=>c[1].cache==="no-store")).toBe(true);
+  });
+  it("rejects an empty enumeration when one approved profile is denied", async () => {
+    emptyAssets();
+    respond({ error: { code: 100, message: "no access" } }, 400);
+    respond({ error: { code: 100, message: "no access" } }, 400);
+    await expect(getSerriniAssets("system-token")).rejects.toThrow();
+  });
+  it("rejects an empty enumeration with a mismatched canonical identity", async () => {
+    emptyAssets();
+    respond({ id: "17841415718399486", username: "someone_else" });
+    respond({ id: "17841480865798985", username: "someone_else" });
+    await expect(getSerriniAssets("system-token")).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+  it("rejects an empty enumeration if account media access fails", async () => {
+    emptyAssets();
+    respond({ id: "17841415718399486", username: "serrinion" });
+    respond({ id: "17841480865798985", username: "serrini666" });
+    respond({ error: { code: 10 } }, 400);
+    respond({ data: [] });
+    await expect(getSerriniAssets("system-token")).rejects.toThrow();
+  });
+  it("does not try direct IDs when enumeration returns only unrelated accounts", async () => {
+    respond({ client_business_id: "222" });
+    respond({ data: { is_valid: true, app_id: "111", scopes: SERRINI_SCOPES, expires_at: Math.floor(Date.now()/1000)+3600 } });
+    respond({ data: [{ id: "999", username: "other_brand" }] });
+    await expect(getSerriniAssets("system-token")).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+  it("rejects a selector ID even when the enumerated handle matches", async () => {
+    respond({ client_business_id: "222" });
+    respond({ data: { is_valid: true, app_id: "111", scopes: SERRINI_SCOPES, expires_at: Math.floor(Date.now()/1000)+3600 } });
+    respond({ data: [{ id: "1514801001710328", username: "serrini666" }] });
+    await expect(getSerriniAssets("system-token")).rejects.toThrow();
+  });
+
   it("rejects another business portfolio", async () => {
     respond({ client_business_id: "999" });
     respond({ data: {} });
@@ -197,7 +252,7 @@ describe("Serrini OAuth provenance", () => {
     async (expires_at) => {
       respond({ client_business_id: "222" });
       respond({ data: { is_valid: true, app_id: "111", scopes: SERRINI_SCOPES, expires_at } });
-      respond({ data: [{ id: "12345", username: "serrini666" }] });
+      respond({ data: [{ id: "17841480865798985", username: "serrini666" }] });
       await expect(getSerriniAssets("system-token")).rejects.toThrow();
     },
   );

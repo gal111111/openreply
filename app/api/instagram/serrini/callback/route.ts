@@ -150,6 +150,10 @@ export async function GET(request: NextRequest) {
         });
       }
     }
+    await prisma.operationalEvent.create({ data: {
+      workspaceId, source: "SYSTEM", level: "INFO",
+      message: `Serrini connection verified [${assets.verificationMethod};accounts_${profiles.length}].`,
+    } }).catch(() => {});
     return finish("connected");
   } catch (error) {
     await prisma.operationalEvent
