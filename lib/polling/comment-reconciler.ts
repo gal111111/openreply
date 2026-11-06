@@ -371,7 +371,7 @@ async function sweepCampaign({
       // The listing does not carry replies on Instagram Login, so ask this
       // comment directly whether the account (a person or this tool) has
       // already answered it. A lookup failure falls back to answering, as before.
-      if (!(c.replies?.data?.length)) {
+      if (!isSerrini && !(c.replies?.data?.length)) {
         try {
           const replies = await getCommentReplies({ context: accessToken, commentId: c.id });
           if (!isSerrini && replies.some((r) => isFromAccount(r.from, account) || isFromAccount({ username: r.username }, account))) {

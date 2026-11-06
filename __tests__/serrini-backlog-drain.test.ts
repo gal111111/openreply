@@ -60,6 +60,7 @@ describe("Serrini automatic backlog", () => {
     expect(m.add.mock.calls[0][2].delay).toBeUndefined();
     expect(m.add.mock.calls[59][2].delay).toBeUndefined();
     expect(new Set(m.add.mock.calls.map(c => c[1].commentId)).size).toBe(60);
+    expect(m.replies).not.toHaveBeenCalled();
   });
 
   it("holds the account before queueing on an unresolved send or restriction", async () => {
