@@ -230,7 +230,18 @@ export async function sendPrivateReply(
         headers: { Authorization: `Bearer ${tokenValue(accessToken)}` }, signal: AbortSignal.timeout(10_000),
       }));
       if (actual.id !== receipt.message_id || actual.message !== message || actual.from?.id !== instagramAccountId || !actual.to?.data.some(p => p.id === receipt.recipient_id)) throw new MetaDeliveryUnconfirmedError();
-    } catch { throw new MetaDeliveryUnconfirmedError(); }
+    } catch {
+      // A successful POST may precede direct message-node availability. Read the
+      // same receipt inside the destination conversation; never POST again.
+      try {
+        const conversations = await getConversations(accessToken, instagramAccountId);
+        const thread = conversations.find(c => c.participants?.data.some(p => p.id === receipt.recipient_id));
+        if (!thread) throw new MetaDeliveryUnconfirmedError();
+        const messages = await getConversationMessages(accessToken, thread.id);
+        const actual = messages.find(m => m.id === receipt.message_id);
+        if (!actual || actual.from?.id !== instagramAccountId || actual.message !== message) throw new MetaDeliveryUnconfirmedError();
+      } catch { throw new MetaDeliveryUnconfirmedError(); }
+    }
   }
   return receipt;
 }

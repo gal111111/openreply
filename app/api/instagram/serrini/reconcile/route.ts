@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { prisma } from "@/lib/db/client";
+import { reconcilePrivateMessage } from "@/lib/meta/serrini-reconciliation";
 import { getBaseUrl } from "@/lib/env";
 import { canManageWorkspace, getCurrentWorkspaceContext } from "@/lib/workspace-access";
 import { createInstagramContext } from "@/lib/instagram/context";
@@ -13,7 +14,7 @@ import { matchKeywords } from "@/lib/utils/keyword-matcher";
 
 export const dynamic = "force-dynamic";
 const resourceSchema = z.object({ key: z.enum(["ECC","COUNCIL","AI","SCRIPT","EDITOR","BROCHURE","EVENT"]), shortcode: z.string().regex(/^[A-Za-z0-9_-]+$/), keywords: z.array(z.string().min(1).max(50)).min(1).max(10), message: z.string().min(1).max(1000), guideMarkers: z.array(z.string().min(5)).min(1).max(3), heldNames: z.array(z.string().regex(/^[a-zA-Z0-9_.]+$/)).max(200).default([]) });
-const bodySchema = z.object({ action: z.enum(["prepare","activate","backfill"]), account: z.enum(["serrinion","serrini666"]), resources: z.array(resourceSchema).max(7).optional() });
+const bodySchema = z.object({ action: z.enum(["prepare","activate","backfill","reconcile"]), account: z.enum(["serrinion","serrini666"]), resources: z.array(resourceSchema).max(7).optional() });
 const ids: Record<string,string> = {serrinion:"17841415718399486",serrini666:"17841480865798985"};
 function reply(data: unknown, status=200) { return NextResponse.json(data,{status,headers:{"Cache-Control":"no-store"}}); }
 
@@ -97,6 +98,26 @@ export async function POST(request:NextRequest) {
     for(const c of campaigns) {
       const history=await getResourceHistory(context.workspaceId,account.id,c.id);
       if(!history || history.postId!==c.postId || history.messageHash!==createHash("sha256").update(c.dmMessage).digest("hex")) return reply({error:"Historical exclusions missing or source changed"},409);
+    }
+    if(body.action==="reconcile") {
+      const unknowns=await prisma.dmLog.findMany({where:{instagramAccountId:account.id,workspaceId:context.workspaceId,dmDeliveryUnconfirmed:true,automationId:{in:campaigns.map(c=>c.id)}},orderBy:{createdAt:"asc"},take:25});
+      const conversations=await getConversations(token,account.instagramId);
+      let verified=0;
+      for(const log of unknowns) {
+        const campaign=campaigns.find(c=>c.id===log.automationId)!;
+        const thread=conversations.find(c=>c.participants?.data.some(p=>p.id===log.commenterId && p.username?.toLowerCase()===log.commenterName?.toLowerCase()));
+        if(!thread) continue;
+        const messages=await getConversationMessages(token,thread.id);
+        const message=reconcilePrivateMessage(messages,{accountId:account.instagramId,body:campaign.dmMessage,createdAt:log.createdAt,updatedAt:log.updatedAt});
+        if(!message) continue;
+        verified+=await prisma.$transaction(async tx=>{
+          const claim=await tx.dmLog.updateMany({where:{id:log.id,dmDeliveryUnconfirmed:true},data:{status:"SENT",dmSentAt:new Date(message.created_time!),dmDeliveryUnconfirmed:false,errorMessage:null}});
+          if(!claim.count) return 0;
+          await tx.operationalEvent.create({data:{workspaceId:context.workspaceId,source:"SYSTEM",message:"Serrini private resource readback verified",payload:{account:body.account,commentId:log.commentId,recipient:log.commenterName,recipientId:log.commenterId,body:message.message,receipt:{message_id:message.id,recipient_id:log.commenterId},verification:"own_conversation_exact_author_recipient_body_unique_attempt_window",conversationId:thread.id}}});
+          return 1;
+        });
+      }
+      return reply({verified,remainingUnknown:unknowns.length-verified,privatePostAttempts:0});
     }
     if(body.action==="activate") {
       await prisma.automation.updateMany({where:{id:{in:campaigns.map(c=>c.id)},workspaceId:context.workspaceId},data:{isActive:true}});
