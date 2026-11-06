@@ -1,4 +1,5 @@
 import { getResourceHistory, historyAllows, SERRINI_IDS } from "@/lib/meta/serrini-history";
+import { hasSerriniDeliveryHold } from "@/lib/meta/serrini-delivery-hold";
 import { isStopRequest, suppressSerriniSender } from "@/lib/meta/serrini-suppression";
 import { createHash } from "node:crypto";
 import { UnrecoverableError, Worker, type Job } from "bullmq";
@@ -409,6 +410,11 @@ async function processCommentLocked(job: Job<ProcessCommentJob>): Promise<void> 
     }
 
     if (SERRINI_IDS.has(instagramAccountId)) {
+      if (await hasSerriniDeliveryHold(automation.instagramAccountId)) continue;
+      const suppressed = await prisma.instagramReplySuppression.findUnique({
+        where: { instagramAccountId_senderId: { instagramAccountId: automation.instagramAccountId, senderId: commenterId } },
+      });
+      if (suppressed) continue;
       const history = await getResourceHistory(automation.workspaceId, automation.instagramAccountId, automation.id);
       if (!history || history.postId !== automation.postId || history.messageHash !== createHash("sha256").update(automation.dmMessage).digest("hex") || !historyAllows(history, commenterName, commenterId)) continue;
     }

@@ -26,6 +26,7 @@
  */
 
 import { prisma } from "@/lib/db/client";
+import { createHash } from "node:crypto";
 import { getDMQueue } from "@/lib/queue/client";
 import {
   getCommentReplies,
@@ -40,7 +41,8 @@ import {
 } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 import { isIgnoredComment, isIgnoredCommenter } from "@/lib/utils/ignored-commenters";
-import { SERRINI_IDS } from "@/lib/meta/serrini-history";
+import { getResourceHistory, historyAllows, SERRINI_IDS } from "@/lib/meta/serrini-history";
+import { hasSerriniDeliveryHold } from "@/lib/meta/serrini-delivery-hold";
 
 // Only consider comments from the last few days — older ones are outside
 // Instagram's private-reply window anyway, so a DM to them would just fail.
@@ -48,6 +50,9 @@ const LOOKBACK_HOURS = Number(process.env.COMMENT_POLL_LOOKBACK_HOURS ?? 72);
 // Hard cap on how many new comments a single campaign can enqueue per sweep, so
 // a viral post drains gradually instead of bursting into the comment API.
 const MAX_NEW_PER_SWEEP = Number(process.env.COMMENT_POLL_MAX_PER_SWEEP ?? 30);
+// Drain requested resources through the existing worker and its atomic hourly
+// send reservations; do not impose an additional one-minute delay.
+const SERRINI_BATCH_SIZE = 500;
 // For "any post" campaigns, how many recent posts to scan.
 const RECENT_MEDIA_LIMIT = 10;
 // How long the sweep keeps re-queuing a comment whose DM failed.
@@ -60,6 +65,8 @@ interface SweepStat {
   alreadyReplied: number;
   enqueued: number;
   errors: string[];
+  historyHeld?: number;
+  suppressed?: number;
   // Shape of replies that were not recognised as the account's (diagnostics).
   replySample?: string;
 }
@@ -106,6 +113,7 @@ export async function reconcileComments(): Promise<void> {
       keywords: true,
       wholeWordMatch: true,
       publicReplyEnabled: true,
+      dmMessage: true,
       workspaceId: true,
       instagramAccount: {
         select: {
@@ -129,13 +137,16 @@ export async function reconcileComments(): Promise<void> {
   // matches a comment in one job, so a post covered by two campaigns must not
   // queue the comment twice (two concurrent jobs double-posted public replies).
   const queuedThisSweep = new Set<string>();
+  const serriniSlots = new Map<string, number>();
 
   for (const automation of automations) {
     const stat = await sweepCampaign({
       automation: automation,
-      sinceMs: sinceMs,
+      sinceMs: SERRINI_IDS.has(automation.instagramAccount.instagramId)
+        ? Date.now() - 7 * 24 * 60 * 60 * 1000 : sinceMs,
       tokenCache: tokenCache,
       queuedThisSweep: queuedThisSweep,
+      serriniSlots,
     }).catch(
       (error): SweepStat => ({
         campaign: automation.name,
@@ -155,9 +166,11 @@ async function sweepCampaign({
   sinceMs,
   tokenCache,
   queuedThisSweep,
+  serriniSlots,
 }: {
   automation: {
     id: string;
+    workspaceId: string;
     name: string;
     postId: string | null;
     matchAnyPost: boolean;
@@ -165,6 +178,7 @@ async function sweepCampaign({
     keywords: string[];
     wholeWordMatch: boolean;
     publicReplyEnabled: boolean;
+    dmMessage: string;
     instagramAccount: {
       id: string;
       instagramId: string;
@@ -175,11 +189,14 @@ async function sweepCampaign({
       zernioAccountId: string | null;
     };
   };
+
   sinceMs: number;
   tokenCache: Map<string, InstagramContext | null>;
   queuedThisSweep: Set<string>;
+  serriniSlots: Map<string, number>;
 }): Promise<SweepStat> {
   const account = automation.instagramAccount;
+  const isSerrini = SERRINI_IDS.has(account.instagramId);
   const stat: SweepStat = {
     campaign: automation.name,
     keywords: automation.matchAnyWord
@@ -190,6 +207,24 @@ async function sweepCampaign({
     enqueued: 0,
     errors: [],
   };
+
+  if (isSerrini && await hasSerriniDeliveryHold(account.id)) {
+    stat.errors.push("Account held for unknown delivery reconciliation or platform restriction");
+    return stat;
+  }
+
+  const history = isSerrini
+    ? await getResourceHistory(automation.workspaceId, account.id, automation.id)
+    : undefined;
+  if (isSerrini && (!history || history.postId !== automation.postId ||
+    history.messageHash !== createHash("sha256").update(automation.dmMessage).digest("hex"))) {
+    stat.errors.push("Verified resource history missing or source changed; held");
+    return stat;
+  }
+  const suppressed = new Set(isSerrini
+    ? (await prisma.instagramReplySuppression.findMany({
+        where: { instagramAccountId: account.id }, select: { senderId: true },
+      })).map(s => s.senderId) : []);
 
   // Decrypt the account token once per sweep.
   let accessToken = tokenCache.get(account.id);
@@ -257,6 +292,18 @@ async function sweepCampaign({
       if (!matched) return false;
       stat.matched += 1;
 
+      // Apply these before taking the oldest batch. Otherwise one historically
+      // held recipient is queued every sweep, silently skipped by the worker,
+      // and permanently prevents hundreds of later requests from progressing.
+      if (isSerrini && !historyAllows(history, c.from.username ?? c.username, c.from.id)) {
+        stat.historyHeld = (stat.historyHeld ?? 0) + 1;
+        return false;
+      }
+      if (suppressed.has(c.from.id)) {
+        stat.suppressed = (stat.suppressed ?? 0) + 1;
+        return false;
+      }
+
       const replies = c.replies?.data ?? [];
       const ownerReplied = replies.some(
         (r) =>
@@ -265,7 +312,8 @@ async function sweepCampaign({
       );
       if (ownerReplied) {
         stat.alreadyReplied += 1;
-        return false;
+        // A historical public reply alone does not prove private delivery.
+        if (!isSerrini) return false;
       }
       if (replies.length > 0 && !stat.replySample) {
         // Replies exist but none is recognised as the account's: keep the
@@ -289,6 +337,7 @@ async function sweepCampaign({
         automationId: automation.id,
         commentId: { in: needsAction.map((c) => c.id) },
         OR: [
+          ...(isSerrini ? [{ dmDeliveryUnconfirmed: true }] : []),
           {
             AND: [
               { OR: [{ status: "SENT" }, { dmDeliveryUnconfirmed: true }] },
@@ -312,7 +361,9 @@ async function sweepCampaign({
     const fresh = needsAction
       .filter((c) => !handledSet.has(c.id))
       .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
-      .slice(0, SERRINI_IDS.has(account.instagramId) ? 1 : MAX_NEW_PER_SWEEP);
+      .slice(0, isSerrini
+        ? Math.max(0, SERRINI_BATCH_SIZE - (serriniSlots.get(account.id) ?? 0))
+        : MAX_NEW_PER_SWEEP);
 
     for (const c of fresh) {
       if (queuedThisSweep.has(c.id)) continue;
@@ -323,7 +374,7 @@ async function sweepCampaign({
       if (!(c.replies?.data?.length)) {
         try {
           const replies = await getCommentReplies({ context: accessToken, commentId: c.id });
-          if (replies.some((r) => isFromAccount(r.from, account) || isFromAccount({ username: r.username }, account))) {
+          if (!isSerrini && replies.some((r) => isFromAccount(r.from, account) || isFromAccount({ username: r.username }, account))) {
             stat.alreadyReplied += 1;
             console.log(`[Sweep] ${automation.name}: comment ${c.id} already answered by @${account.username}; skipped`);
             continue;
@@ -345,13 +396,14 @@ async function sweepCampaign({
       // drop this add, so the comment would never be retried. Dedup is handled
       // above (owner-reply + DmLog guards) and the worker is idempotent
       // (publicReplySentAt / SENT), so re-processing a comment is safe.
+      const slot = serriniSlots.get(account.id) ?? 0;
       await queue.add("process-comment", {
         instagramAccountId: account.instagramId,
         accountConnectionId: account.id,
         commentId: c.id,
         commentText: c.text ?? "",
         commenterId: c.from!.id,
-        commenterName: c.from?.username,
+        commenterName: c.from?.username ?? c.username,
         mediaId,
         // When the sweep is looking at an ad, the campaign is bound to the post
         // the ad was made from: without this the worker matches nothing and
@@ -362,7 +414,11 @@ async function sweepCampaign({
             ? automation.postId
             : undefined,
         source: "POLLING",
-      });
+      }, isSerrini ? {
+        jobId: `serrini_poll_${account.id}_${c.id}`,
+        removeOnComplete: true,
+      } : undefined);
+      if (isSerrini) serriniSlots.set(account.id, slot + 1);
       stat.enqueued += 1;
     }
   }
