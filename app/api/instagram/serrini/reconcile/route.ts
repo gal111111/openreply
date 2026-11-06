@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { prisma } from "@/lib/db/client";
+import { getBaseUrl } from "@/lib/env";
 import { canManageWorkspace, getCurrentWorkspaceContext } from "@/lib/workspace-access";
 import { createInstagramContext } from "@/lib/instagram/context";
 import { getAllUserMedia, getUserInfo, getConversations, getConversationMessages, getRecentMediaComments, subscribeInstagramAccountToWebhooks } from "@/lib/meta/client";
@@ -30,7 +31,7 @@ export async function GET() {
 export async function POST(request:NextRequest) {
   const context=await getCurrentWorkspaceContext();
   if(!context || !canManageWorkspace(context.role)) return reply({error:"Administrator required"},403);
-  if(request.headers.get("origin") !== new URL(request.url).origin) return reply({error:"Same-origin request required"},403);
+  if(request.headers.get("origin") !== new URL(getBaseUrl()).origin) return reply({error:"Same-origin request required"},403);
   const parsed=bodySchema.safeParse(await request.json().catch(()=>null));
   if(!parsed.success) return reply({error:"Invalid resource request"},400);
   const body=parsed.data;
