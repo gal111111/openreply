@@ -135,11 +135,11 @@ export async function POST(request:NextRequest) {
         if(!historyAllows(history,name,comment.from?.id) || comment.from?.id===account.instagramId) {held++;continue;}
         const old=await prisma.dmLog.findFirst({where:{instagramAccountId:account.id,OR:[{commentId:comment.id},{automationId:c.id,commenterId:comment.from!.id,status:"SENT"}]}});
         if(old) {held++;continue;}
-        if(queued>=10) continue;
-        await getDMQueue().add("process-comment",{accountConnectionId:account.id,instagramAccountId:account.instagramId,mediaId:c.postId!,commentId:comment.id,commentText:comment.text??"",commenterId:comment.from!.id,commenterName:name,source:"POLLING"},{jobId:`comment_${account.instagramId}_${comment.id}`});queued++;
+        if(queued>=2) continue;
+        await getDMQueue().add("process-comment",{accountConnectionId:account.id,instagramAccountId:account.instagramId,mediaId:c.postId!,commentId:comment.id,commentText:comment.text??"",commenterId:comment.from!.id,commenterName:name,source:"POLLING"},{jobId:`comment_${account.instagramId}_${comment.id}`,delay:queued*60_000});queued++;
       }
     }
-    return reply({queued,held,matched:seen,complete:false,note:"Queued is not sent; inspect verified platform receipts."});
+    return reply({queued,held,matched:seen,batchLimit:2,spacingMs:60000,complete:false,note:"Queued is not sent; inspect verified platform receipts. New webhook comments use the existing immediate queue."});
   } catch(error) {
     // Graph errors may carry request details: only fixed code/name leaves this route.
     return reply({error:"Serrini reconciliation failed",category:error instanceof Error ? error.name : "unknown",code:typeof error==="object" && error && "code" in error ? error.code : null,subcode:typeof error==="object" && error && "subcode" in error ? error.subcode ?? null : null},502);

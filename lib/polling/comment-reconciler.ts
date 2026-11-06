@@ -40,6 +40,7 @@ import {
 } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 import { isIgnoredComment, isIgnoredCommenter } from "@/lib/utils/ignored-commenters";
+import { SERRINI_IDS } from "@/lib/meta/serrini-history";
 
 // Only consider comments from the last few days — older ones are outside
 // Instagram's private-reply window anyway, so a DM to them would just fail.
@@ -311,7 +312,7 @@ async function sweepCampaign({
     const fresh = needsAction
       .filter((c) => !handledSet.has(c.id))
       .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
-      .slice(0, MAX_NEW_PER_SWEEP);
+      .slice(0, SERRINI_IDS.has(account.instagramId) ? 1 : MAX_NEW_PER_SWEEP);
 
     for (const c of fresh) {
       if (queuedThisSweep.has(c.id)) continue;
