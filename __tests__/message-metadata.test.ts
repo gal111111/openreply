@@ -76,12 +76,14 @@ describe("exact native message metadata", () => {
       }] },
     });
     const result = await getMessageMetadata(token, originalMessage.id);
-    expect(result.attachments[0]).toEqual({
+    expect(result.attachments[0]).toMatchObject({
       id: "attachment", hasGenericTemplate: true,
-      callToAction: {
+      templateFields: { cta: { type: "object", arrayCount: null } },
+      callToActions: [{
+        source: "cta",
         type: "web_url", title: "免費人才登記",
         urlOrigin: "https://openreply.example", urlPath: "/r/tracked", hasQuery: true,
-      },
+      }],
     });
     expect(result.isUnsupported).toBe(true);
     expect(JSON.stringify(result)).not.toMatch(/password|signed=|private attachment|file_url|image_data/);
@@ -95,11 +97,85 @@ describe("exact native message metadata", () => {
         attachments: { data: [{ generic_template: { cta: { url } } }] },
       });
       const result = await getMessageMetadata(token, originalMessage.id);
-      expect(result.attachments[0].callToAction?.urlOrigin).toBeNull();
-      expect(result.attachments[0].callToAction?.urlPath).toBeNull();
+      expect(result.attachments[0].callToActions[0].urlOrigin).toBeNull();
+      expect(result.attachments[0].callToActions[0].urlPath).toBeNull();
       expect(fetchMock).toHaveBeenCalledTimes(1);
     }
   );
+
+  it("reads each structured CTA entry when the provider returns an array", async () => {
+    respond({
+      ...originalMessage,
+      attachments: { data: [{ generic_template: { cta: [
+        { type: "web_url", title: "免費人才登記", url: "https://openreply.example/r/tracked?private=hidden" },
+        { type: "postback", title: "Continue", payload: "private-payload" },
+        null, "private-text", [],
+      ] } }] },
+    });
+    const attachment = (await getMessageMetadata(token, originalMessage.id)).attachments[0];
+    expect(attachment.templateFields.cta).toEqual({ type: "array", arrayCount: 5 });
+    expect(attachment.callToActions).toEqual([
+      { source: "cta", type: "web_url", title: "免費人才登記", urlOrigin: "https://openreply.example", urlPath: "/r/tracked", hasQuery: true },
+      { source: "cta", type: "postback", title: "Continue", urlOrigin: null, urlPath: null, hasQuery: null },
+    ]);
+    expect(JSON.stringify(attachment)).not.toMatch(/private|hidden|payload/);
+  });
+
+  it.each([undefined, null, "private-unknown-format", 12])(
+    "keeps absent or unrecognized CTA values explicit without returning them (%s)", async (cta) => {
+      respond({ ...originalMessage, attachments: { data: [{ generic_template: { cta } }] } });
+      const attachment = (await getMessageMetadata(token, originalMessage.id)).attachments[0];
+      expect(attachment.templateFields.cta).toEqual({
+        type: cta === undefined ? "absent" : cta === null ? "null" : typeof cta,
+        arrayCount: null,
+      });
+      expect(attachment.callToActions).toEqual([]);
+      expect(JSON.stringify(attachment)).not.toContain("private-unknown-format");
+    }
+  );
+
+  it("limits template structure and nested button metadata to fixed allowlisted fields", async () => {
+    respond({ ...originalMessage, attachments: { data: [{ generic_template: {
+      title: "private-body", unexpected: "private-secret",
+      buttons: [{ type: "web_url", title: "登記", url: "https://openreply.example/r/top?private=secret" }],
+      elements: [{
+        title: "private-card-body", image_url: "https://private.example/image",
+        buttons: [{ type: "web_url", title: "免費人才登記", url: "https://openreply.example/r/nested#private" }],
+        default_action: { type: "web_url", url: "https://openreply.example/r/default" },
+      }, null],
+    } }] } });
+    const attachment = (await getMessageMetadata(token, originalMessage.id)).attachments[0];
+    expect(attachment.templateFields).toMatchObject({
+      genericTemplate: { type: "object", arrayCount: null },
+      cta: { type: "absent", arrayCount: null },
+      buttons: { type: "array", arrayCount: 1 },
+      elements: { type: "array", arrayCount: 2 },
+      elementActions: [
+        { cta: { type: "absent", arrayCount: null }, buttons: { type: "array", arrayCount: 1 }, defaultAction: { type: "object", arrayCount: null } },
+        { cta: { type: "absent", arrayCount: null }, buttons: { type: "absent", arrayCount: null }, defaultAction: { type: "absent", arrayCount: null } },
+      ],
+    });
+    expect(attachment.callToActions.map((action) => action.source)).toEqual([
+      "buttons", "elements[0].buttons", "elements[0].default_action",
+    ]);
+    expect(attachment.callToActions.map((action) => action.urlPath)).toEqual([
+      "/r/top", "/r/nested", "/r/default",
+    ]);
+    expect(JSON.stringify(attachment)).not.toMatch(/private|secret|image_url|unexpected|body/);
+  });
+
+  it("projects JSON-encoded structured CTA data without exposing its raw value", async () => {
+    respond({ ...originalMessage, attachments: { data: [{ generic_template: {
+      cta: JSON.stringify([{ type: "web_url", title: "免費人才登記", url: "https://openreply.example/r/tracked?private=secret", payload: "private-body" }]),
+    } }] } });
+    const attachment = (await getMessageMetadata(token, originalMessage.id)).attachments[0];
+    expect(attachment.templateFields.cta).toEqual({ type: "string", arrayCount: null });
+    expect(attachment.callToActions).toEqual([{
+      source: "cta", type: "web_url", title: "免費人才登記",
+      urlOrigin: "https://openreply.example", urlPath: "/r/tracked", hasQuery: true,
+    }]);
+    expect(JSON.stringify(attachment)).not.toMatch(/private|secret|payload|body/);
+  });
 
   it("retains the original unified connection's Graph host", async () => {
     const fetchMock = respond(originalMessage);

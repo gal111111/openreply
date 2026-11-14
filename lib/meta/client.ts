@@ -624,6 +624,30 @@ export interface InstagramConversation {
   messages?: { data: InstagramMessage[] };
 }
 
+interface MessageTemplateFieldShape {
+  type: string;
+  arrayCount: number | null;
+}
+
+function messageTemplateFieldShape(value: unknown): MessageTemplateFieldShape {
+  if (value === undefined) return { type: "absent", arrayCount: null };
+  if (value === null) return { type: "null", arrayCount: null };
+  if (Array.isArray(value)) return { type: "array", arrayCount: value.length };
+  return { type: typeof value, arrayCount: null };
+}
+
+function isMessageTemplateObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function messageTemplateActionEntries(value: unknown): unknown[] {
+  let decoded = value;
+  if (typeof value === "string") {
+    try { decoded = JSON.parse(value); } catch { return []; }
+  }
+  return Array.isArray(decoded) ? decoded : [decoded];
+}
+
 export interface InstagramMessageMetadata {
   id: string;
   fromId: string | null;
@@ -635,13 +659,26 @@ export interface InstagramMessageMetadata {
   attachments: {
     id: string | null;
     hasGenericTemplate: boolean;
-    callToAction: {
+    templateFields: {
+      genericTemplate: MessageTemplateFieldShape;
+      cta: MessageTemplateFieldShape;
+      buttons: MessageTemplateFieldShape;
+      defaultAction: MessageTemplateFieldShape;
+      elements: MessageTemplateFieldShape;
+      elementActions: {
+        cta: MessageTemplateFieldShape;
+        buttons: MessageTemplateFieldShape;
+        defaultAction: MessageTemplateFieldShape;
+      }[];
+    };
+    callToActions: {
+      source: string;
       type: string | null;
       title: string | null;
       urlOrigin: string | null;
       urlPath: string | null;
       hasQuery: boolean | null;
-    } | null;
+    }[];
   }[];
 }
 
@@ -770,29 +807,65 @@ export async function getMessageMetadata(
     is_unsupported?: boolean;
     attachments?: { data?: {
       id?: string;
-      generic_template?: { cta?: { type?: string; title?: string; url?: string } };
+      generic_template?: unknown;
     }[] };
   }>(response);
   const attachmentsReturned = Array.isArray(data.attachments?.data);
   const attachments = (attachmentsReturned ? data.attachments!.data! : []).map((attachment) => {
-    const action = attachment.generic_template?.cta;
-    let actionUrl: URL | null = null;
-    if (typeof action?.url === "string" && !action.url.includes(tokenValue(accessToken))) {
-      try {
-        const parsed = new URL(action.url);
-        if (parsed.protocol === "https:" || parsed.protocol === "http:") actionUrl = parsed;
-      } catch { /* Missing or invalid URL metadata remains unknown. */ }
-    }
+    const template = isMessageTemplateObject(attachment.generic_template) ? attachment.generic_template : {};
+    const elements = Array.isArray(template.elements) ? template.elements : [];
+    const actionSources = [
+      { source: "cta", value: template.cta },
+      { source: "buttons", value: template.buttons },
+      { source: "default_action", value: template.default_action },
+      ...elements.flatMap((element, index) => {
+        if (!isMessageTemplateObject(element)) return [];
+        return [
+          { source: `elements[${index}].cta`, value: element.cta },
+          { source: `elements[${index}].buttons`, value: element.buttons },
+          { source: `elements[${index}].default_action`, value: element.default_action },
+        ];
+      }),
+    ];
+    const callToActions = actionSources.flatMap(({ source, value }) => {
+      const entries = messageTemplateActionEntries(value);
+      return entries.filter(isMessageTemplateObject).map((action) => {
+        let actionUrl: URL | null = null;
+        if (typeof action.url === "string" && !action.url.includes(tokenValue(accessToken))) {
+          try {
+            const parsed = new URL(action.url);
+            if (parsed.protocol === "https:" || parsed.protocol === "http:") actionUrl = parsed;
+          } catch { /* Missing or invalid URL metadata remains unknown. */ }
+        }
+        return {
+          source,
+          type: typeof action.type === "string" ? action.type : null,
+          title: typeof action.title === "string" ? action.title : null,
+          urlOrigin: actionUrl?.origin ?? null,
+          urlPath: actionUrl?.pathname ?? null,
+          hasQuery: actionUrl ? Boolean(actionUrl.search || actionUrl.hash) : null,
+        };
+      });
+    });
     return {
       id: typeof attachment.id === "string" ? attachment.id : null,
       hasGenericTemplate: Boolean(attachment.generic_template),
-      callToAction: action ? {
-        type: typeof action.type === "string" ? action.type : null,
-        title: typeof action.title === "string" ? action.title : null,
-        urlOrigin: actionUrl?.origin ?? null,
-        urlPath: actionUrl?.pathname ?? null,
-        hasQuery: actionUrl ? Boolean(actionUrl.search || actionUrl.hash) : null,
-      } : null,
+      templateFields: {
+        genericTemplate: messageTemplateFieldShape(attachment.generic_template),
+        cta: messageTemplateFieldShape(template.cta),
+        buttons: messageTemplateFieldShape(template.buttons),
+        defaultAction: messageTemplateFieldShape(template.default_action),
+        elements: messageTemplateFieldShape(template.elements),
+        elementActions: elements.map((element) => {
+          const fields = isMessageTemplateObject(element) ? element : {};
+          return {
+            cta: messageTemplateFieldShape(fields.cta),
+            buttons: messageTemplateFieldShape(fields.buttons),
+            defaultAction: messageTemplateFieldShape(fields.default_action),
+          };
+        }),
+      },
+      callToActions,
     };
   });
   return {
