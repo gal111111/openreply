@@ -72,3 +72,16 @@ export async function getConversationMessages({
           : undefined,
   }));
 }
+
+export async function getMessageMetadata({
+  context,
+  messageId,
+}: {
+  context: InstagramContext;
+  messageId: string;
+}): Promise<meta.InstagramMessageMetadata> {
+  if (context.provider !== "META") {
+    throw new Error("Message metadata requires the original Meta connection");
+  }
+  return meta.getMessageMetadata(context.accessToken, messageId);
+}

@@ -624,6 +624,27 @@ export interface InstagramConversation {
   messages?: { data: InstagramMessage[] };
 }
 
+export interface InstagramMessageMetadata {
+  id: string;
+  fromId: string | null;
+  toIds: string[];
+  createdTime: string | null;
+  isUnsupported: boolean | null;
+  attachmentsReturned: boolean;
+  attachmentCount: number | null;
+  attachments: {
+    id: string | null;
+    hasGenericTemplate: boolean;
+    callToAction: {
+      type: string | null;
+      title: string | null;
+      urlOrigin: string | null;
+      urlPath: string | null;
+      hasQuery: boolean | null;
+    } | null;
+  }[];
+}
+
 /**
  * Load up to 50 recent conversations. A single broken field expansion can make
  * Meta reject the entire page with code 1 (upstream issue #60). Halve only those
@@ -731,6 +752,59 @@ export async function getConversationMessages(
     response
   );
   return data.messages?.data ?? [];
+}
+
+/** Read one already-identified message. Attachment files and bodies stay private. */
+export async function getMessageMetadata(
+  accessToken: MetaCredential,
+  messageId: string
+): Promise<InstagramMessageMetadata> {
+  const url = new URL(`${instagramGraphBase(accessToken)}/${encodeURIComponent(messageId)}`);
+  url.searchParams.set("fields", "id,created_time,from,to,is_unsupported,attachments{id,generic_template}");
+  const response = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${tokenValue(accessToken)}` },
+    cache: "no-store",
+    signal: AbortSignal.timeout(10_000),
+  });
+  const data = await handleResponse<InstagramMessage & {
+    is_unsupported?: boolean;
+    attachments?: { data?: {
+      id?: string;
+      generic_template?: { cta?: { type?: string; title?: string; url?: string } };
+    }[] };
+  }>(response);
+  const attachmentsReturned = Array.isArray(data.attachments?.data);
+  const attachments = (attachmentsReturned ? data.attachments!.data! : []).map((attachment) => {
+    const action = attachment.generic_template?.cta;
+    let actionUrl: URL | null = null;
+    if (typeof action?.url === "string" && !action.url.includes(tokenValue(accessToken))) {
+      try {
+        const parsed = new URL(action.url);
+        if (parsed.protocol === "https:" || parsed.protocol === "http:") actionUrl = parsed;
+      } catch { /* Missing or invalid URL metadata remains unknown. */ }
+    }
+    return {
+      id: typeof attachment.id === "string" ? attachment.id : null,
+      hasGenericTemplate: Boolean(attachment.generic_template),
+      callToAction: action ? {
+        type: typeof action.type === "string" ? action.type : null,
+        title: typeof action.title === "string" ? action.title : null,
+        urlOrigin: actionUrl?.origin ?? null,
+        urlPath: actionUrl?.pathname ?? null,
+        hasQuery: actionUrl ? Boolean(actionUrl.search || actionUrl.hash) : null,
+      } : null,
+    };
+  });
+  return {
+    id: data.id,
+    fromId: data.from?.id ?? null,
+    toIds: data.to?.data?.map((participant) => participant.id) ?? [],
+    createdTime: data.created_time ?? null,
+    isUnsupported: typeof data.is_unsupported === "boolean" ? data.is_unsupported : null,
+    attachmentsReturned,
+    attachmentCount: attachmentsReturned ? attachments.length : null,
+    attachments,
+  };
 }
 
 export async function getUserInfo(accessToken: MetaCredential): Promise<InstagramUser> {
