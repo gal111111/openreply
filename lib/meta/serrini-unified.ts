@@ -1,6 +1,8 @@
 import { requireEnv } from "@/lib/env";
 import { type MetaCredential } from "./credentials";
 import { z } from "zod";
+import { createUnifiedTokenExpiration } from "@/lib/integrations/unified-connection-handoff";
+import { getUnifiedTarget, selectUnifiedTargetAccount } from "./unified-targets";
 
 export const SERRINI_STATE_COOKIE = "serrini_instagram_oauth";
 export const SERRINI_STATE_PREFIX = "serrini-unified:";
@@ -62,14 +64,28 @@ async function graphJson(path: string, token: string, step: string) {
   return data;
 }
 
+function resolveRegisteredTarget(targetKey?: string) {
+  if (targetKey === undefined) return null;
+  const target = getUnifiedTarget(targetKey);
+  if (
+    requireEnv("SERRINI_META_APP_ID") !== target.appId ||
+    requireEnv("SERRINI_META_CONFIG_ID") !== target.configId
+  ) {
+    throw new SerriniConnectionError("target_check", 0, "target_config_mismatch");
+  }
+  return target;
+}
+
 export function getSerriniAuthorizationUrl(
   redirectUri: string,
   state: string,
+  targetKey?: string,
 ): string {
+  const target = resolveRegisteredTarget(targetKey);
   const url = new URL("https://www.facebook.com/dialog/oauth");
   url.search = new URLSearchParams({
-    client_id: requireEnv("SERRINI_META_APP_ID"),
-    config_id: requireEnv("SERRINI_META_CONFIG_ID"),
+    client_id: target?.appId ?? requireEnv("SERRINI_META_APP_ID"),
+    config_id: target?.configId ?? requireEnv("SERRINI_META_CONFIG_ID"),
     redirect_uri: redirectUri,
     response_type: "code",
     display: "popup",
@@ -80,7 +96,8 @@ export function getSerriniAuthorizationUrl(
   return url.toString();
 }
 
-export async function exchangeSerriniCode(code: string, redirectUri: string) {
+export async function exchangeSerriniCode(code: string, redirectUri: string, targetKey?: string) {
+  const target = resolveRegisteredTarget(targetKey);
   const url = new URL(`${GRAPH}/oauth/access_token`);
   url.search = new URLSearchParams({
     client_id: requireEnv("SERRINI_META_APP_ID"),
@@ -102,12 +119,23 @@ export async function exchangeSerriniCode(code: string, redirectUri: string) {
   return z
     .object({
       access_token: z.string().min(1),
-      expires_in: z.number().positive().optional(),
+      expires_in: target ? z.number().int().nonnegative().optional() : z.number().positive().optional(),
     })
     .parse(data);
 }
 
-export async function getSerriniAssets(accessToken: string) {
+type SerriniAssetVerification = {
+  businessId: string;
+  verificationMethod: "assigned_accounts" | "direct_approved_accounts";
+  accounts: z.infer<typeof accountSchema>[];
+  scopes: string[];
+  expiresAt: Date | null;
+};
+
+export function getSerriniAssets(accessToken: string): Promise<SerriniAssetVerification & { expiresAt: Date }>;
+export function getSerriniAssets(accessToken: string, targetKey: string): Promise<SerriniAssetVerification>;
+export async function getSerriniAssets(accessToken: string, targetKey?: string): Promise<SerriniAssetVerification> {
+  const target = resolveRegisteredTarget(targetKey);
   const [business, debug] = await Promise.all([
     graphJson("me?fields=client_business_id", accessToken, "business_read"),
     graphJson(
@@ -126,20 +154,22 @@ export async function getSerriniAssets(accessToken: string) {
         is_valid: z.literal(true),
         app_id: id,
         scopes: z.array(z.string()),
-        expires_at: z.number().positive(),
+        expires_at: target ? z.number().int().nonnegative() : z.number().positive(),
       }),
     })
     .parse(debug).data;
   if (token.app_id !== requireEnv("SERRINI_META_APP_ID")) {
     throw new SerriniConnectionError("app_check", 0, `received_${token.app_id}`, "Serrini app permissions are incomplete");
   }
-  const missingScopes = SERRINI_SCOPES.filter((scope) => !token.scopes.includes(scope));
+  const requiredScopes = target?.requiredScopes ?? SERRINI_SCOPES;
+  const missingScopes = requiredScopes.filter((scope) => !token.scopes.includes(scope));
   if (missingScopes.length) {
     throw new SerriniConnectionError("scope_check", 0, `missing_${missingScopes.join("+")}`, "Serrini app permissions are incomplete");
   }
-  if (token.expires_at * 1000 <= Date.now())
+  const expiration = target ? createUnifiedTokenExpiration(token.expires_at) : null;
+  if (!target && token.expires_at * 1000 <= Date.now())
     throw new Error("Serrini token has expired");
-  if (token.expires_at * 1000 > Date.now() + (60 * 86400 + 300) * 1000)
+  if (!target && token.expires_at * 1000 > Date.now() + (60 * 86400 + 300) * 1000)
     throw new Error("Serrini token exceeds the approved 60-day lifetime");
   const accounts: z.infer<typeof accountSchema>[] = [];
   let path: string | null =
@@ -155,6 +185,15 @@ export async function getSerriniAssets(accessToken: string) {
     path = `me/assigned_instagram_accounts?fields=id,username&limit=100&after=${encodeURIComponent(after)}`;
     if (cursors.size >= 20)
       throw new Error("Assigned Instagram account listing exceeded its limit");
+  }
+  if (target) {
+    return {
+      businessId,
+      verificationMethod: "assigned_accounts",
+      accounts: [selectUnifiedTargetAccount(target.key, accounts)],
+      scopes: token.scopes,
+      expiresAt: expiration?.kind === "never" ? null : new Date(token.expires_at * 1000),
+    };
   }
   let selected = accounts.filter((account) =>
     SERRINI_HANDLES.has(account.username.toLowerCase()),

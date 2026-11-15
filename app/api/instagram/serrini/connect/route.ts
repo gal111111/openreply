@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import {
   canManageWorkspace,
   getCurrentWorkspaceContext,
@@ -10,8 +10,9 @@ import {
   SERRINI_STATE_COOKIE,
   SERRINI_STATE_PREFIX,
 } from "@/lib/meta/serrini-unified";
+import { createUnifiedTargetState, getUnifiedTarget } from "@/lib/meta/unified-targets";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const base = getBaseUrl();
   const context = await getCurrentWorkspaceContext();
   if (!context) return NextResponse.redirect(`${base}/login`);
@@ -31,11 +32,29 @@ export async function GET() {
       { status: 503 },
     );
   }
-  const state = createOAuthState(SERRINI_STATE_PREFIX + context.workspaceId);
-  const response = NextResponse.redirect(
-    getSerriniAuthorizationUrl(`${base}/api/instagram/serrini/callback`, state),
-  );
-  response.cookies.set(SERRINI_STATE_COOKIE, state, {
+  const targetKey = request.nextUrl.searchParams.get("target");
+  let target: ReturnType<typeof getUnifiedTarget> | null = null;
+  if (targetKey !== null) {
+    try {
+      target = getUnifiedTarget(targetKey);
+    } catch {
+      return NextResponse.json({ error: "Unsupported connection target" }, { status: 400 });
+    }
+  }
+  const payload = target
+    ? createUnifiedTargetState(target.key, context.workspaceId)
+    : SERRINI_STATE_PREFIX + context.workspaceId;
+  const state = createOAuthState(payload);
+  let authorizationUrl: string;
+  try {
+    authorizationUrl = getSerriniAuthorizationUrl(
+      `${base}/api/instagram/serrini/callback`, state, target?.key,
+    );
+  } catch {
+    return NextResponse.json({ error: "Connection target configuration is incomplete" }, { status: 503 });
+  }
+  const response = NextResponse.redirect(authorizationUrl);
+  response.cookies.set(target?.stateCookie ?? SERRINI_STATE_COOKIE, state, {
     httpOnly: true,
     secure: new URL(base).protocol === "https:",
     sameSite: "lax",
