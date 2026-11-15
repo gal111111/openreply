@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const MAX_AUTOMATION_KEYWORDS = 12;
+
 // Shared by the session route (/api/automations) and the HobbyLand
 // integration route (/api/integrations/v1/automations), so both create
 // campaigns with the same validation and the same dependent-field rules.
@@ -13,7 +15,7 @@ export const createAutomationSchema = z
     postUrl: z.string().url().optional().nullable(),
     pendingNextReel: z.boolean().optional().default(false),
     matchAnyPost: z.boolean().optional().default(false),
-    keywords: z.array(z.string().min(1).max(50)).max(10).optional().default([]),
+    keywords: z.array(z.string().min(1).max(50)).max(MAX_AUTOMATION_KEYWORDS).optional().default([]),
     matchAnyWord: z.boolean().optional().default(false),
     dmTriggerEnabled: z.boolean().optional().default(false),
     dmFallback: z.boolean().optional().default(false),

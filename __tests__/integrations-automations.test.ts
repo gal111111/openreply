@@ -110,6 +110,25 @@ beforeEach(() => {
 });
 
 describe("POST /api/integrations/v1/automations", () => {
+  it("accepts twelve keywords and rejects a thirteenth at the integration entry point", async () => {
+    const keywords = [
+      "登記", "登记", "報名", "报名", "應徵", "应征",
+      "想做", "有興趣", "有兴趣", "register", "搵工", "揾工",
+    ];
+    const accepted = await POST(post({ ...payload, keywords }));
+    expect(accepted.status).toBe(201);
+    expect([...store.values()][0].keywords).toEqual(keywords);
+
+    mockPrisma.automation.create.mockClear();
+    const rejected = await POST(post({
+      ...payload,
+      external_id: "hub:too-many-keywords",
+      keywords: [...keywords, "extra"],
+    }));
+    expect(rejected.status).toBe(400);
+    expect(mockPrisma.automation.create).not.toHaveBeenCalled();
+  });
+
   it("returns 401 without a key and 403 without the scope", async () => {
     const noKey = new NextRequest("http://localhost/api/integrations/v1/automations", {
       method: "POST",

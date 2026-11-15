@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { MAX_AUTOMATION_KEYWORDS } from "@/lib/campaigns/automation-input";
 import { prisma } from "@/lib/db/client";
 import { getWorkspaceInstagramAccount } from "@/lib/instagram-accounts";
 import { generateReportShareSlug } from "@/lib/reports/share";
@@ -12,7 +13,7 @@ import {
 const campaignSchema = z.object({
   postId: z.string().min(1),
   postUrl: z.string().optional().nullable(),
-  keywords: z.array(z.string().min(1).max(50)).min(1).max(10),
+  keywords: z.array(z.string().min(1).max(50)).min(1).max(MAX_AUTOMATION_KEYWORDS),
   dmMessage: z.string().min(1).max(1000),
   name: z.string().max(100).optional().nullable(),
   goal: z.string().max(120).optional().nullable(),

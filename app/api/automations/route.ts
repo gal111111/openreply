@@ -13,6 +13,7 @@ import { buildReportUrl, generateReportShareSlug } from "@/lib/reports/share";
 import {
   buildAutomationCreateFields,
   createAutomationSchema,
+  MAX_AUTOMATION_KEYWORDS,
 } from "@/lib/campaigns/automation-input";
 import {
   canManageWorkspace,
@@ -30,7 +31,7 @@ const updateAutomationSchema = z.object({
   postUrl: z.string().url().optional().nullable(),
   pendingNextReel: z.boolean().optional(),
   matchAnyPost: z.boolean().optional(),
-  keywords: z.array(z.string().min(1).max(50)).max(10).optional(),
+  keywords: z.array(z.string().min(1).max(50)).max(MAX_AUTOMATION_KEYWORDS).optional(),
   matchAnyWord: z.boolean().optional(),
   dmTriggerEnabled: z.boolean().optional(),
   dmMessage: z.string().min(1).max(1000).optional(),

@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db/client";
 import {
   buildAutomationCreateFields,
   createAutomationSchema,
+  MAX_AUTOMATION_KEYWORDS,
 } from "@/lib/campaigns/automation-input";
 import {
   buildInitialCampaignLinks,
@@ -45,7 +46,7 @@ const bodySchema = z
     post_url: z.string().url().optional().nullable(),
     // Optional: the media id, when the caller already knows it. Skips the lookup.
     post_id: z.string().trim().min(1).optional().nullable(),
-    keywords: z.array(z.string().trim().min(1).max(50)).max(10).optional().default([]),
+    keywords: z.array(z.string().trim().min(1).max(50)).max(MAX_AUTOMATION_KEYWORDS).optional().default([]),
     // Fire on every comment on the post; keywords are then ignored for comments.
     match_any_comment: z.boolean().optional().default(false),
     // Also fire when someone DMs one of the keywords.
