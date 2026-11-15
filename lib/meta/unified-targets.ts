@@ -11,6 +11,7 @@ const foundrRequiredScopes = Object.freeze([
 
 export const FOUNDR_UNIFIED_TARGET = Object.freeze({
   key: "foundr",
+  displayName: "Foundr",
   contentCenterProfileId: 13,
   username: "kingofhkai",
   appId: "1574251267790326",
@@ -20,14 +21,45 @@ export const FOUNDR_UNIFIED_TARGET = Object.freeze({
   requiredScopes: foundrRequiredScopes,
 } as const);
 
+export const TALENT_UNIFIED_TARGET = Object.freeze({
+  key: "talent",
+  displayName: "HK AI Talents",
+  contentCenterProfileId: 9,
+  username: "aieverydayyyyy",
+  instagramId: "17841453286100150",
+  openReplyAccountId: "cmw0fvqyl00010dptynpxm95p",
+  workspaceId: "cmutbjo0l00010dl18clrgsap",
+  replyOwner: "openreply",
+  appId: "1574251267790326",
+  configId: "1133446066003520",
+  statePrefix: "talent-unified:",
+  stateCookie: "talent_instagram_oauth",
+  requiredScopes: Object.freeze([
+    "instagram_basic",
+    "instagram_content_publish",
+    "instagram_manage_comments",
+    "instagram_manage_messages",
+  ] as const),
+} as const);
+
+const unifiedTargets = Object.freeze({
+  foundr: FOUNDR_UNIFIED_TARGET,
+  talent: TALENT_UNIFIED_TARGET,
+});
+
 export const unifiedTargetStateSchema = z.object({
-  targetKey: z.literal(FOUNDR_UNIFIED_TARGET.key),
-  contentCenterProfileId: z.literal(FOUNDR_UNIFIED_TARGET.contentCenterProfileId),
+  targetKey: z.enum(["foundr", "talent"]),
+  contentCenterProfileId: z.number().int(),
   workspaceId: z.string().trim().min(1),
-  username: z.string().toLowerCase().pipe(z.literal(FOUNDR_UNIFIED_TARGET.username)),
+  username: z.string().toLowerCase(),
   appId: z.literal(FOUNDR_UNIFIED_TARGET.appId),
   configId: z.literal(FOUNDR_UNIFIED_TARGET.configId),
-}).strict();
+}).strict().refine((state) => {
+  const target = getUnifiedTarget(state.targetKey);
+  return state.contentCenterProfileId === target.contentCenterProfileId &&
+    state.username === target.username &&
+    (target.key !== "talent" || state.workspaceId === target.workspaceId);
+});
 
 export type UnifiedTargetState = z.infer<typeof unifiedTargetStateSchema>;
 
@@ -37,10 +69,10 @@ const assignedAccountSchema = z.object({
 });
 
 export function getUnifiedTarget(key: unknown) {
-  if (key !== FOUNDR_UNIFIED_TARGET.key) {
+  if (key !== "foundr" && key !== "talent") {
     throw new Error("Unsupported Unified Login target");
   }
-  return FOUNDR_UNIFIED_TARGET;
+  return unifiedTargets[key];
 }
 
 // Carry this value through the existing signed OAuth state and cookie checks.
@@ -63,8 +95,13 @@ export function createUnifiedTargetState(key: unknown, workspaceId: string): str
 
 // Call after verifyOAuthState has checked the signed envelope and its age.
 export function parseUnifiedTargetState(value: unknown): UnifiedTargetState {
-  const target = FOUNDR_UNIFIED_TARGET;
-  if (typeof value !== "string" || !value.startsWith(target.statePrefix)) {
+  if (typeof value !== "string") {
+    throw new Error("Invalid Unified Login target state");
+  }
+  const target = Object.values(unifiedTargets).find((candidate) =>
+    value.startsWith(candidate.statePrefix),
+  );
+  if (!target) {
     throw new Error("Invalid Unified Login target state");
   }
 
@@ -78,7 +115,7 @@ export function parseUnifiedTargetState(value: unknown): UnifiedTargetState {
   }
 
   const result = unifiedTargetStateSchema.safeParse(payload);
-  if (!result.success) {
+  if (!result.success || result.data.targetKey !== target.key) {
     throw new Error("Invalid Unified Login target state");
   }
   return result.data;
@@ -88,7 +125,7 @@ export function selectUnifiedTargetAccount(
   key: unknown,
   assignedAccounts: unknown,
   previousInstagramId?: string,
-): { id: string; username: typeof FOUNDR_UNIFIED_TARGET.username } {
+): { id: string; username: ReturnType<typeof getUnifiedTarget>["username"] } {
   const target = getUnifiedTarget(key);
   const result = z.array(assignedAccountSchema).safeParse(assignedAccounts);
   if (!result.success) {
@@ -106,6 +143,9 @@ export function selectUnifiedTargetAccount(
   }
 
   const account = accountsById.values().next().value!;
+  if (target.key === "talent" && account.id !== target.instagramId) {
+    throw new Error("Unified Login target account binding changed");
+  }
   if (previousInstagramId !== undefined && account.id !== previousInstagramId) {
     throw new Error("Unified Login target account binding changed");
   }

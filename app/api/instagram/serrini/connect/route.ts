@@ -41,6 +41,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unsupported connection target" }, { status: 400 });
     }
   }
+  if (target?.key === "talent" && context.workspaceId !== target.workspaceId) {
+    return NextResponse.json({ error: "Connection target is outside this workspace" }, { status: 403 });
+  }
   const payload = target
     ? createUnifiedTargetState(target.key, context.workspaceId)
     : SERRINI_STATE_PREFIX + context.workspaceId;

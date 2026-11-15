@@ -175,7 +175,7 @@ describe("normal Unified connect entry point", () => {
     expect(response.cookies.get(TARGET.stateCookie)).toBeUndefined();
   });
 
-  it.each(["talent", "13", "kingofhkai", ""])("rejects an unregistered target %s", async (target) => {
+  it.each(["13", "kingofhkai", ""])("rejects an unregistered target %s", async (target) => {
     expect((await connect(connectRequest(`?target=${target}`))).status).toBe(400);
   });
 

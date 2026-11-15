@@ -35,7 +35,7 @@ describe("registered Foundr Unified Login target", () => {
     expect(Object.isFrozen(getUnifiedTarget("foundr"))).toBe(true);
   });
 
-  it.each([undefined, null, "serrini", "talent", "13", "kingofhkai", {}])(
+  it.each([undefined, null, "serrini", "13", "kingofhkai", {}])(
     "rejects an unregistered selector %s",
     (key) => expect(() => getUnifiedTarget(key)).toThrow("Unsupported Unified Login target"),
   );

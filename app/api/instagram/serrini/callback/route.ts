@@ -20,6 +20,7 @@ import {
 } from "@/lib/meta/serrini-unified";
 import {
   FOUNDR_UNIFIED_TARGET,
+  TALENT_UNIFIED_TARGET,
   getUnifiedTarget,
   parseUnifiedTargetState,
   selectUnifiedTargetAccount,
@@ -55,6 +56,8 @@ export async function GET(request: NextRequest) {
   } else {
     if (state.workspaceId.startsWith(FOUNDR_UNIFIED_TARGET.statePrefix)) {
       stateCookie = FOUNDR_UNIFIED_TARGET.stateCookie;
+    } else if (state.workspaceId.startsWith(TALENT_UNIFIED_TARGET.statePrefix)) {
+      stateCookie = TALENT_UNIFIED_TARGET.stateCookie;
     }
     try {
       const targetState = parseUnifiedTargetState(state.workspaceId);
@@ -82,6 +85,7 @@ export async function GET(request: NextRequest) {
   if (request.nextUrl.searchParams.has("error")) return finish("denied");
   const code = request.nextUrl.searchParams.get("code");
   if (!code) return finish("invalid");
+  const connectionName = target?.displayName ?? "Serrini";
   let stage = "token_exchange";
   try {
     const token = await exchangeSerriniCode(code, `${base}/api/instagram/serrini/callback`, target?.key);
@@ -89,6 +93,9 @@ export async function GET(request: NextRequest) {
     const assets = target
       ? await getSerriniAssets(token.access_token, target.key)
       : await getSerriniAssets(token.access_token);
+    if (target?.key === "talent" && assets.scopes.includes("instagram_manage_insights")) {
+      throw new Error("Unified Login connection permissions exceed the approved target");
+    }
     stage = "profile_verification";
     const profiles = await Promise.all(
       assets.accounts.map(async (account) => {
@@ -191,7 +198,7 @@ export async function GET(request: NextRequest) {
               workspaceId,
               source: "SYSTEM",
               level: "INFO",
-              message: "Foundr Instagram connection verified. Content Center handoff pending.",
+              message: `${connectionName} Instagram connection verified. Content Center handoff pending.`,
               payload: { ...receipt, contentCenterHandoff: "pending" },
             },
           });
@@ -218,14 +225,14 @@ export async function GET(request: NextRequest) {
             workspaceId,
             source: "SYSTEM",
             level: "WARNING",
-            message: `${target ? "Foundr" : "Serrini"} webhook subscription pending for @${profile.username}`,
+            message: `${connectionName} webhook subscription pending for @${profile.username}`,
           },
         }).catch(() => {});
       }
     }
     await prisma.operationalEvent.create({ data: {
       workspaceId, source: "SYSTEM", level: "INFO",
-      message: `${target ? "Foundr" : "Serrini"} connection verified [${assets.verificationMethod};accounts_${profiles.length}].`,
+      message: `${connectionName} connection verified [${assets.verificationMethod};accounts_${profiles.length}].`,
     } }).catch(() => {});
     return finish("connected");
   } catch (error) {
@@ -236,7 +243,7 @@ export async function GET(request: NextRequest) {
           source: "SYSTEM",
           level: "ERROR",
           message:
-            `${target ? "Foundr" : "Serrini"} Unified Login connection failed [${stage};${serriniFailureDiagnostic(error)}].`,
+            `${connectionName} Unified Login connection failed [${stage};${serriniFailureDiagnostic(error)}].`,
         },
       })
       .catch(() => {});

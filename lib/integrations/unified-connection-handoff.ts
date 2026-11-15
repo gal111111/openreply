@@ -13,7 +13,7 @@ const expirationSchema = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
-const handoffSchema = unifiedTargetStateSchema.extend({
+const handoffSchema = unifiedTargetStateSchema.safeExtend({
   platform: z.literal("instagram"),
   openReplyAccountId: z.string().trim().min(1),
   instagramId: z.string().regex(/^[1-9]\d*$/),
@@ -63,8 +63,17 @@ export function parseUnifiedConnectionHandoff(
 
   const handoff = result.data;
   const target = getUnifiedTarget(handoff.targetKey);
+  if (target.key === "talent" && (
+    handoff.instagramId !== target.instagramId ||
+    handoff.openReplyAccountId !== target.openReplyAccountId
+  )) {
+    throw new Error("Invalid Unified Login connection handoff");
+  }
   if (!target.requiredScopes.every((scope) => handoff.scopes.includes(scope))) {
     throw new Error("Unified Login connection permissions are incomplete");
+  }
+  if (target.key === "talent" && handoff.scopes.includes("instagram_manage_insights")) {
+    throw new Error("Unified Login connection permissions exceed the approved target");
   }
   if (
     handoff.expiration.kind === "expires_at" &&
