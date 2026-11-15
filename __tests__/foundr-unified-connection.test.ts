@@ -84,6 +84,17 @@ function result(response: Response) {
   return new URL(response.headers.get("location")!).searchParams.get("serrini");
 }
 
+function assignedPages(pages: unknown[]) {
+  const original = fetchMock.getMockImplementation()!;
+  let pageIndex = 0;
+  fetchMock.mockImplementation(async (input: string) => {
+    if (new URL(input).pathname === "/v27.0/me/assigned_instagram_accounts") {
+      return new Response(JSON.stringify(pages[pageIndex++]));
+    }
+    return original(input);
+  });
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.useFakeTimers();
@@ -191,6 +202,28 @@ describe("Foundr verified Graph assets", () => {
   it("uses the configured real finite lifetime", async () => {
     tokenExpiry = Date.now() / 1000 + 90 * 86400;
     expect((await getSerriniAssets(TOKEN, "foundr")).expiresAt?.getTime()).toBe(tokenExpiry * 1000);
+  });
+
+  it("verifies the complete assigned account enumeration across pages", async () => {
+    assignedPages([
+      { data: [...SERRINI_ACCOUNTS], paging: { next: "next-page", cursors: { after: "second-page" } } },
+      { data: [ACCOUNT] },
+    ]);
+    expect((await getSerriniAssets(TOKEN, "foundr")).accounts).toEqual([ACCOUNT]);
+    expect(new URL(fetchMock.mock.calls[3][0]).searchParams.get("after")).toBe("second-page");
+  });
+
+  it.each([
+    { reason: "missing cursor", pages: [{ data: [ACCOUNT], paging: { next: "next-page" } }] },
+    { reason: "repeated cursor", pages: [
+      { data: [ACCOUNT], paging: { next: "next-page", cursors: { after: "same-page" } } },
+      { data: [], paging: { next: "next-page", cursors: { after: "same-page" } } },
+    ] },
+  ])("rejects an incomplete enumeration with $reason", async ({ pages }) => {
+    assignedPages(pages);
+    await expect(getSerriniAssets(TOKEN, "foundr")).rejects.toMatchObject({
+      step: "assigned_accounts", reason: "incomplete_pagination",
+    });
   });
 
   it.each([

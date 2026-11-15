@@ -179,8 +179,13 @@ export async function getSerriniAssets(accessToken: string, targetKey?: string):
     const page = await graphJson(path, accessToken, "assigned_accounts");
     accounts.push(...z.array(accountSchema).parse(page.data));
     const after = page.paging?.cursors?.after;
-    if (!page.paging?.next || typeof after !== "string" || cursors.has(after))
+    if (!page.paging?.next) break;
+    if (typeof after !== "string" || cursors.has(after) || (target && !after)) {
+      if (target) {
+        throw new SerriniConnectionError("assigned_accounts", 0, "incomplete_pagination");
+      }
       break;
+    }
     cursors.add(after);
     path = `me/assigned_instagram_accounts?fields=id,username&limit=100&after=${encodeURIComponent(after)}`;
     if (cursors.size >= 20)
